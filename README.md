@@ -45,7 +45,7 @@ This is a reworked version of [fulcrum's original script](https://paste.passtheh
 
 ## CSS styling
 
-Custom CSS can be added easily in **TheLounge** &amp;gt; **Settings** &amp;gt; **Appearance**.
+Custom CSS can be added easily in **TheLounge** > **Settings** > **Appearance**.
 You can use the following CSS selectors to target bridged messages in your themes:
 
 ```css
