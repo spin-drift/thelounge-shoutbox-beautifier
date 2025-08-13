@@ -5,6 +5,7 @@
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
+// @icon         https://thelounge.chat/favicon.ico
 // @grant        none
 // ==/UserScript==
 
@@ -36,6 +37,7 @@
 // - 1.0-spindrift: Initial release
 // - 2.0-spindrift: Fix link previews, change return structure to add `modifyContent` and `prefixToRemove`
 // - 2.1-spindrift: Sanitize zero-width characters (fixes HUNO Discord handler)
+// - 2.2-sparrow:   Add option to hide the user has joined/left messages. Add thelounge icon to tampermonkey
 
 // CSS STYLING:
 // Custom CSS can be added easily in TheLounge > Settings > Appearance.
@@ -74,6 +76,7 @@
         ],
         USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
         USE_DECORATORS: false,   // Enable username decorators
+        REMOVE_JOIN_QUIT: true, // Removes the joined and quit messages
         DECORATOR_L: '(',       // Will be prepended to username
         DECORATOR_R: ')',       // Will be appended to username
         METADATA: 'SB',         // Default metadata to be inserted into HTML
@@ -481,10 +484,21 @@
         // If modifyContent is false, we only transform the username and leave content untouched
     }
 
+    // Hides the 'User has joined/left messages
+    function hideJoinAndQuitMessages() {
+        document.querySelectorAll('[data-type="quit"], [data-type="join"], [data-type="condensed"]').forEach(el => {
+            el.style.display = 'none';
+        });
+    }
+
     // Create and start observing DOM changes
     const observer = new MutationObserver((mutations) => {
         mutations.forEach((mutation) => {
             mutation.addedNodes.forEach((node) => {
+                // Hide the "user has joined/quit" messages.
+                if (CONFIG.REMOVE_JOIN_QUIT){
+                    hideJoinAndQuitMessages();
+                }
                 if (node.nodeType === 1 && node.classList.contains('msg')) {
                     processMessage(node);
                 }
