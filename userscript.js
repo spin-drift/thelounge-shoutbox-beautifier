@@ -434,12 +434,12 @@
         // Removes join/quit messages, if configured
         // If you'd like to do this in pure CSS instead, use:
         // div[data-type=join], div[data-type=quit], div[data-type=condensed] { display: none !important; }
-        IF (CONFIG.REMOVE_JOIN_QUIT) {
+        if (CONFIG.REMOVE_JOIN_QUIT) {
             if (!!messageElement.matches('div[data-type="condensed"],div[data-type="join"],div[data-type="quit"]')) {
                 messageElement.style.display = 'none'; // Hide join/quit messages
-            return;
+                return;
             }
-        }
+        };
 
         // Get the username
         const fromSpan = messageElement.querySelector('.from .user');
