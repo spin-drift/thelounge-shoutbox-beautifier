@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.1-spindrift
+// @version      2.3
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -34,10 +34,10 @@
 // - When in doubt, simply refresh the page
 
 // CHANGELOG:
-// - 1.0-spindrift: Initial release
-// - 2.0-spindrift: Fix link previews, change return structure to add `modifyContent` and `prefixToRemove`
-// - 2.1-spindrift: Sanitize zero-width characters (fixes HUNO Discord handler)
-// - 2.2-sparrow:   Add option to hide the user has joined/left messages. Add thelounge icon to tampermonkey
+// - 1.0 - (spindrift) Initial release
+// - 2.0 - (spindrift) Fix link previews, change return structure to add `modifyContent` and `prefixToRemove`
+// - 2.1 - (spindrift) Sanitize zero-width characters (fixes HUNO Discord handler)
+// - 2.2 - (sparrow) Add option to hide join/part messages, add TheLounge icon to Tampermonkey
 
 // CSS STYLING:
 // Custom CSS can be added easily in TheLounge > Settings > Appearance.
@@ -75,8 +75,8 @@
             /.+?-web/,          // HUNO (Shoutbox)
         ],
         USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
-        USE_DECORATORS: false,   // Enable username decorators
-        REMOVE_JOIN_QUIT: true, // Removes the joined and quit messages
+        USE_DECORATORS: true,   // Enable username decorators
+        REMOVE_JOIN_QUIT: false,// Removes join/part messages
         DECORATOR_L: '(',       // Will be prepended to username
         DECORATOR_R: ')',       // Will be appended to username
         METADATA: 'SB',         // Default metadata to be inserted into HTML
@@ -412,6 +412,17 @@
         }
     }
 
+    // Hides join/part messages
+    // If you'd like to do this in pure CSS instead, use:
+    // div[data-type=join], div[data-type=quit], div[data-type=condensed] {
+    //   display: none !important;
+    // }
+    function hideJoinAndQuitMessages() {
+        document.querySelectorAll('[data-type="quit"], [data-type="join"], [data-type="condensed"]').forEach(el => {
+            el.style.display = 'none';
+        });
+    }
+
     // Called on page load to process any shoutbox messages already present,
     // before the observer starts watching for new messages
     function processExistingMessages() {
@@ -484,18 +495,11 @@
         // If modifyContent is false, we only transform the username and leave content untouched
     }
 
-    // Hides the 'User has joined/left messages
-    function hideJoinAndQuitMessages() {
-        document.querySelectorAll('[data-type="quit"], [data-type="join"], [data-type="condensed"]').forEach(el => {
-            el.style.display = 'none';
-        });
-    }
-
     // Create and start observing DOM changes
     const observer = new MutationObserver((mutations) => {
         mutations.forEach((mutation) => {
             mutation.addedNodes.forEach((node) => {
-                // Hide the "user has joined/quit" messages.
+                // Hide join/part messages
                 if (CONFIG.REMOVE_JOIN_QUIT){
                     hideJoinAndQuitMessages();
                 }
