@@ -2,8 +2,6 @@
 
 **Known compatibility:** ATH, BHD, HUNO, LST, ULCX
 
-**Current version:** 2.1
-
 ## Screenshots
 
 [![Screenshot 1](https://i.badkitty.zone/4YV6xk.png)](https://i.badkitty.zone/4YV6xk.png)
@@ -36,12 +34,6 @@ This is a reworked version of [fulcrum's original script](https://paste.passtheh
 - Try disabling autocomplete (`USE_AUTOCOMPLETE: false`)
 - Check the browser console for errors
 - When in doubt, simply refresh the page (sometimes necessary regardless)
-
-## Changelog:
-
-- 1.0-spindrift: Initial release
-- 2.0-spindrift: Fix link previews, change return structure to add `modifyContent` and `prefixToRemove`
-- 2.1-spindrift: Sanitize zero-width characters (fixes HUNO Discord handler)
 
 ## CSS styling
 
