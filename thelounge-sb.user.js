@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -16,6 +16,7 @@
 // - Regex matcher support: Pair with custom handlers to do almost anything
 // - Preview support: Surgical DOM modification preserves link previews and event listeners
 // - More handlers: BHD, extensive HUNO support
+// - Nick coloring: Bridged usernames get proper TheLounge colors instead of inheriting bot colors
 
 // CREDITS:
 // fulcrum: Original script (https://aither.cc/forums/topics/3874)
@@ -38,6 +39,7 @@
 // - 2.0 - (spindrift) Fix link previews, change return structure to add `modifyContent` and `prefixToRemove`
 // - 2.1 - (spindrift) Sanitize zero-width characters (fixes HUNO Discord handler)
 // - 2.2 - (sparrow) Add option to hide join/quit messages, add TheLounge icon to Tampermonkey
+// - 2.3 - (spindrift) Add color matching - bridged usernames get proper TheLounge colors
 
 // CSS STYLING:
 // Custom CSS can be added easily in TheLounge > Settings > Appearance.
@@ -163,7 +165,7 @@
                     FORCE_ABBREVIATE: false  // Always abbreviates rank, even if it's only one word
                 };
 
-                 // Clean zero-width characters from the text before processing
+                // Clean zero-width characters from the text before processing
                 const cleanText = msg.text.replace(/[\u200B-\u200D\uFEFF]/g, '');
 
                 // Two-step approach: try « format first, then space format
@@ -258,7 +260,7 @@
             null,
             false
         );
-        
+
         let accumulatedText = '';
         const nodesToProcess = [];
         let textNode;
@@ -271,7 +273,7 @@
                 text: nodeText,
                 accumulatedLength: accumulatedText.length
             });
-            
+
             accumulatedText += nodeText;
 
             // Stop when we have enough text to contain the full prefix
@@ -279,7 +281,7 @@
                 break;
             }
         }
-        
+
         return { nodesToProcess, accumulatedText };
     }
 
@@ -290,7 +292,7 @@
         // Clean zero-width characters from accumulated text for comparison
         // This ensures we match the same cleaned text that handlers worked with
         const cleanedAccumulatedText = accumulatedText.replace(/[\u200B-\u200D\uFEFF]/g, '');
-        
+
         // Verify we found the expected prefix (after cleaning)
         if (!cleanedAccumulatedText.startsWith(prefixText)) {
             console.warn('Surgical removal failed - could not find expected prefix:', prefixText);
@@ -298,24 +300,24 @@
             console.warn('Found in DOM:', JSON.stringify(cleanedAccumulatedText.substring(0, prefixText.length + 10)));
             return false;
         }
-        
+
         // We need to account for zero-width characters when calculating removal length
         // Calculate how much to remove from the original (uncleaned) text
         let remainingToRemove = prefixText.length;
         let cleanedCharsProcessed = 0;
-        
+
         // Process each text node to remove the prefix
         for (const { node, text } of nodesToProcess) {
             if (cleanedCharsProcessed >= prefixText.length) break;
-            
+
             // Clean this node's text to see how much of the prefix it contains
             const cleanedNodeText = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
             const cleanedNodeLength = cleanedNodeText.length;
-            
+
             // Calculate how much of the cleaned prefix this node represents
             const cleanedCharsInThisNode = Math.min(cleanedNodeLength, prefixText.length - cleanedCharsProcessed);
             cleanedCharsProcessed += cleanedCharsInThisNode;
-            
+
             if (cleanedCharsInThisNode === cleanedNodeLength) {
                 // This entire node's cleaned content is part of the prefix - remove it all
                 node.textContent = '';
@@ -324,25 +326,25 @@
                 // We need to find where the prefix ends in the original (uncleaned) text
                 let originalCharsToRemove = 0;
                 let cleanedCount = 0;
-                
+
                 for (let i = 0; i < text.length && cleanedCount < cleanedCharsInThisNode; i++) {
                     const char = text[i];
                     originalCharsToRemove++;
-                    
+
                     // Count non-zero-width characters
                     if (!/[\u200B-\u200D\uFEFF]/.test(char)) {
                         cleanedCount++;
                     }
                 }
-                
+
                 node.textContent = text.substring(originalCharsToRemove);
                 break; // We're done
             }
         }
-        
+
         // Clean up empty text nodes and their containers
         cleanupEmptyNodes(contentSpan);
-        
+
         return true;
     }
 
@@ -354,18 +356,18 @@
             null,
             false
         );
-        
+
         const emptyTextNodes = [];
         let textNode;
-        
+
         while (textNode = walker.nextNode()) {
             if (textNode.textContent === '') {
                 emptyTextNodes.push(textNode);
             }
         }
-        
+
         emptyTextNodes.forEach(node => node.remove());
-        
+
         // Remove empty span elements that only contained removed text
         // Be careful not to remove spans that might be important for styling or functionality
         const emptySpans = contentSpan.querySelectorAll('span:empty');
@@ -374,7 +376,7 @@
             const classes = span.className;
             const importantClasses = ['preview-size', 'toggle-button', 'user', 'irc-fg', 'irc-bg'];
             const hasImportantClass = importantClasses.some(cls => classes.includes(cls));
-            
+
             if (!hasImportantClass) {
                 span.remove();
             }
@@ -409,6 +411,64 @@
             }
         } catch (error) {
             console.warn('Could not add user ' + username + ' for autocomplete:', error);
+        }
+    }
+
+    // COLOR MATCHING FUNCTIONS:
+    // Handle color assignment for bridged usernames
+
+    function findUserInUserlist(username) {
+        // Find user in the DOM userlist, accounting for IRC mode symbols (@, +, !, etc.)
+        const userlistUsers = document.querySelectorAll('.userlist .user[data-name]');
+
+        for (const userElement of userlistUsers) {
+            const dataName = userElement.getAttribute('data-name');
+            if (dataName === username) {
+                return userElement;
+            }
+        }
+        return null;
+    }
+
+    function getUserColor(username) {
+        // Get the color class for a username, either from existing userlist or by adding them first
+        let userElement = findUserInUserlist(username);
+
+        if (!userElement) {
+            // User not found in userlist, add them to autocomplete which should also add to DOM
+            addUserToAutocomplete(username);
+
+            // Try again after adding - give it a moment to update the DOM
+            setTimeout(() => {
+                userElement = findUserInUserlist(username);
+                if (userElement) {
+                    return extractColorClass(userElement);
+                }
+            }, 50);
+
+            // If still not found, return null and we'll try again later
+            return null;
+        }
+
+        return extractColorClass(userElement);
+    }
+
+    function extractColorClass(userElement) {
+        // Extract the color-X class from a user element
+        const classes = userElement.className.split(' ');
+        const colorClass = classes.find(cls => cls.startsWith('color-'));
+        return colorClass || null;
+    }
+
+    function applyColorToMessage(fromSpan, colorClass) {
+        // Apply the color class to the message's fromSpan
+        if (colorClass) {
+            // Remove any existing color classes
+            const classes = fromSpan.className.split(' ');
+            const filteredClasses = classes.filter(cls => !cls.startsWith('color-'));
+            // Add the new color class
+            filteredClasses.push(colorClass);
+            fromSpan.className = filteredClasses.join(' ');
         }
     }
 
@@ -468,6 +528,9 @@
         // Destructure parsed result
         const { username, modifyContent, prefixToRemove, metadata } = parsed;
 
+        // Check if username changed - if so, we need to handle color matching
+        const usernameChanged = (username !== initialUsername);
+
         // Add and modify message metadata
         fromSpan.setAttribute('data-name', username);
         fromSpan.setAttribute('data-bridged', metadata); // For CSS targeting
@@ -475,6 +538,22 @@
 
         // Add user to autocomplete
         if (CONFIG.USE_AUTOCOMPLETE) { addUserToAutocomplete(username); }
+
+        // Handle color matching if username changed
+        if (usernameChanged) {
+            const colorClass = getUserColor(username);
+            if (colorClass) {
+                applyColorToMessage(fromSpan, colorClass);
+            } else {
+                // Color not available yet, try again after a delay
+                setTimeout(() => {
+                    const retryColorClass = getUserColor(username);
+                    if (retryColorClass) {
+                        applyColorToMessage(fromSpan, retryColorClass);
+                    }
+                }, 200);
+            }
+        }
 
         // Update the username
         if (CONFIG.USE_DECORATORS) {
