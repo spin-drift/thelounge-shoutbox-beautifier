@@ -72,9 +72,9 @@ span[data-bridged-channel~="#huno"]:before {
   content: attr(data-bridged);
   font-size: 8px;
   margin-right: 5px;
+}
+```
 
 # Donations
 
 Like what I do? Feel free to [buy me a coffee](https://buymeacoffee.com/spindrift). :)
-}
-```
