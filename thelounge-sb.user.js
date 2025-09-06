@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.3
+// @version      2.4
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -40,6 +40,7 @@
 // - 2.1 - (spindrift) Sanitize zero-width characters (fixes HUNO Discord handler)
 // - 2.2 - (sparrow) Add option to hide join/quit messages, add TheLounge icon to Tampermonkey
 // - 2.3 - (spindrift) Add color matching - bridged usernames get proper TheLounge colors
+// - 2.4 - (AnabolicsAnonymous) Update ULCX matchers
 
 // CSS STYLING:
 // Custom CSS can be added easily in TheLounge > Settings > Appearance.
