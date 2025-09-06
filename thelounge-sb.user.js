@@ -71,6 +71,7 @@
         MATCHERS: [
             'Chatbot',          // ATH
             '&ULCX',            // ULCX
+            '%ULCX',            // ULCX (New IRC)
             '@Willie',          // BHD
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
