@@ -71,6 +71,7 @@
         // NOTE: A hit from any matcher will run all handlers
         MATCHERS: [
             'Chatbot',          // ATH
+			'&darkpeers',       // DP
             '&ULCX',            // ULCX
             '%ULCX',            // ULCX (New IRC)
             '@Willie',          // BHD
@@ -232,7 +233,7 @@
         },
         {
             // Format: [Nickname] Message or [Nickname]: Message
-            // Used at: ATH, ULCX, LST
+            // Used at: ATH, DP, ULCX, LST
 
             enabled: true,
             handler: function (msg) {
