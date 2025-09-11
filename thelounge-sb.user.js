@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -41,6 +41,7 @@
 // - 2.2 - (sparrow) Add option to hide join/quit messages, add TheLounge icon to Tampermonkey
 // - 2.3 - (spindrift) Add color matching - bridged usernames get proper TheLounge colors
 // - 2.4 - (AnabolicsAnonymous) Update ULCX matchers
+// - 2.5 - (FortKnox1337) Added matchers for DP & RFX
 
 // CSS STYLING:
 // Custom CSS can be added easily in TheLounge > Settings > Appearance.
@@ -71,9 +72,11 @@
         // NOTE: A hit from any matcher will run all handlers
         MATCHERS: [
             'Chatbot',          // ATH
+			'&darkpeers',       // DP
             '&ULCX',            // ULCX
             '%ULCX',            // ULCX (New IRC)
             '@Willie',          // BHD
+			'@WALL-E',          // RFX
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
             /.+?-web/,          // HUNO (Shoutbox)
@@ -145,6 +148,23 @@
             enabled: true,
             handler: function (msg) {
                 const match = msg.text.match(/^\[SB\]\s+([^:]+):\s*(.*)$/);
+                if (!match) return null;
+
+                return {
+                    username: match[1],
+                    modifyContent: true,
+                    prefixToRemove: removeMatchedPrefix(match),
+                    metadata: CONFIG.METADATA
+                };
+            }
+        },
+        {
+            // Format: [Chatbox] Nickname: Message
+            // Used at: RFX
+
+            enabled: true,
+            handler: function (msg) {
+                const match = msg.text.match(/^\[Chatbox\]\s+([^:]+)/);
                 if (!match) return null;
 
                 return {
@@ -232,7 +252,7 @@
         },
         {
             // Format: [Nickname] Message or [Nickname]: Message
-            // Used at: ATH, ULCX, LST
+            // Used at: ATH, DP, ULCX, LST
 
             enabled: true,
             handler: function (msg) {
