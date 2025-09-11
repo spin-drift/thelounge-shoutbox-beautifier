@@ -75,6 +75,7 @@
             '&ULCX',            // ULCX
             '%ULCX',            // ULCX (New IRC)
             '@Willie',          // BHD
+			'@WALL-E',          // RFX
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
             /.+?-web/,          // HUNO (Shoutbox)
@@ -146,6 +147,23 @@
             enabled: true,
             handler: function (msg) {
                 const match = msg.text.match(/^\[SB\]\s+([^:]+):\s*(.*)$/);
+                if (!match) return null;
+
+                return {
+                    username: match[1],
+                    modifyContent: true,
+                    prefixToRemove: removeMatchedPrefix(match),
+                    metadata: CONFIG.METADATA
+                };
+            }
+        },
+        {
+            // Format: [Chatbox] Nickname: Message
+            // Used at: RFX
+
+            enabled: true,
+            handler: function (msg) {
+                const match = msg.text.match(/^\[Chatbox\]\s+([^:]+):\s*(.*)$/);
                 if (!match) return null;
 
                 return {
