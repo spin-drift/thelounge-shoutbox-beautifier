@@ -76,6 +76,7 @@
             '%ULCX',            // ULCX (New IRC)
             '@Willie',          // BHD
 			'@WALL-E',          // RFX
+			'BBot'              // HHD
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
             /.+?-web/,          // HUNO (Shoutbox)
@@ -251,7 +252,7 @@
         },
         {
             // Format: [Nickname] Message or [Nickname]: Message
-            // Used at: ATH, DP, ULCX, LST
+            // Used at: ATH, DP, ULCX, HHD, LST
 
             enabled: true,
             handler: function (msg) {
