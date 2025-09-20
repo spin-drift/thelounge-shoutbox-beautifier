@@ -76,7 +76,7 @@
             '%ULCX',            // ULCX (New IRC)
             '@Willie',          // BHD
 			'@WALL-E',          // RFX
-			'BBot',             // HHD
+			'BBot', '@BBot',    // HHD
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
             /.+?-web/,          // HUNO (Shoutbox)
