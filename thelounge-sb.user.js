@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -41,6 +41,7 @@
 // - 2.2 - (sparrow) Add option to hide join/quit messages, add TheLounge icon to Tampermonkey
 // - 2.3 - (spindrift) Add color matching - bridged usernames get proper TheLounge colors
 // - 2.4 - (AnabolicsAnonymous) Update ULCX matchers
+// - 2.5 - (spindrift) Add ANT support (thanks JCDenton for initial work)
 
 // CSS STYLING:
 // Custom CSS can be added easily in TheLounge > Settings > Appearance.
@@ -71,12 +72,12 @@
         // NOTE: A hit from any matcher will run all handlers
         MATCHERS: [
             'Chatbot',          // ATH
-            '&ULCX',            // ULCX
-            '%ULCX',            // ULCX (New IRC)
+            '%ULCX',            // ULCX
             '@Willie',          // BHD
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
             /.+?-web/,          // HUNO (Shoutbox)
+            '&Sauron',          // ANT
         ],
         USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
         USE_DECORATORS: true,   // Enable username decorators
@@ -139,8 +140,8 @@
 
     const HANDLERS = [
         {
-            // Format: [SB] Nickname: Message
-            // Used at: BHD
+            // Format: [SB] Nickname: Message or [ SB ] (Nickname): Message
+            // Used at: BHD, ANT
 
             enabled: true,
             handler: function (msg) {
@@ -517,7 +518,7 @@
         const contentSpan = messageElement.querySelector('.content'); // Select the content span
         if (!contentSpan) return;
 
-        // Parse the message using format handlers 
+        // Parse the message using format handlers
         const parsed = runFormatHandlers({
             text: contentSpan.textContent,
             html: contentSpan.innerHTML,
