@@ -145,7 +145,7 @@
 
             enabled: true,
             handler: function (msg) {
-                const match = msg.text.match(/^\[SB\]\s+([^:]+):\s*(.*)$/);
+                const match = msg.text.match(/^\[\s?SB\s?\]\s+\(?([^):]+)\)?:\s*(.*)$/);
                 if (!match) return null;
 
                 return {
