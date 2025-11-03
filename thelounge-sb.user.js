@@ -74,6 +74,9 @@
             'Chatbot',          // ATH
             '%ULCX',            // ULCX
             '@Willie',          // BHD
+      			'@WALL-E',          // RFX
+			      'BBot', '@BBot',    // HHD
+          	'&darkpeers',       // DP
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
             /.+?-web/,          // HUNO (Shoutbox)
@@ -146,6 +149,23 @@
             enabled: true,
             handler: function (msg) {
                 const match = msg.text.match(/^\[\s?SB\s?\]\s+\(?([^):]+)\)?:\s*(.*)$/);
+                if (!match) return null;
+
+                return {
+                    username: match[1],
+                    modifyContent: true,
+                    prefixToRemove: removeMatchedPrefix(match),
+                    metadata: CONFIG.METADATA
+                };
+            }
+        },
+        {
+            // Format: [Chatbox] Nickname: Message
+            // Used at: RFX
+
+            enabled: true,
+            handler: function (msg) {
+                const match = msg.text.match(/^\[Chatbox\]\s+([^:]+):\s*(.*)$/);
                 if (!match) return null;
 
                 return {
@@ -233,7 +253,7 @@
         },
         {
             // Format: [Nickname] Message or [Nickname]: Message
-            // Used at: ATH, ULCX, LST
+            // Used at: ATH, DP, ULCX, HHD, LST
 
             enabled: true,
             handler: function (msg) {
