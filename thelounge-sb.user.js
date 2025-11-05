@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -43,6 +43,7 @@
 // - 2.4 - (AnabolicsAnonymous) Update ULCX matchers
 // - 2.5 - (spindrift) Add ANT support (thanks JCDenton for initial work)
 // - 2.6 - (FortKnox1337) Add RFX support, enable DP and HHD support, fix ANT/BHD support (thanks!!)
+// - 2.7 - (cmd430) Enable OE+ support, fix config indents
 
 // CSS STYLING:
 // Custom CSS can be added easily in TheLounge > Settings > Appearance.
@@ -75,13 +76,14 @@
             'Chatbot',          // ATH
             '%ULCX',            // ULCX
             '@Willie',          // BHD
-      			'@WALL-E',          // RFX
-			      'BBot', '@BBot',    // HHD
-          	'&darkpeers',       // DP
+            '@WALL-E',          // RFX
+            'BBot', '@BBot',    // HHD
+            '&darkpeers',       // DP
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
             /.+?-web/,          // HUNO (Shoutbox)
             '&Sauron',          // ANT
+            '+bridgebot',       // OE+
         ],
         USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
         USE_DECORATORS: true,   // Enable username decorators
