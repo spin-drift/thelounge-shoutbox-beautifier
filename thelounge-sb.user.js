@@ -43,7 +43,7 @@
 // - 2.4 - (AnabolicsAnonymous) Update ULCX matchers
 // - 2.5 - (spindrift) Add ANT support (thanks JCDenton for initial work)
 // - 2.6 - (FortKnox1337) Add RFX support, enable DP and HHD support, fix ANT/BHD support (thanks!!)
-// - 2.7 - (cmd430) Enable OE+ support, fix config indents
+// - 2.7 - (cmd430) Enable OE+ support, fix config indents, fixes script breaking after viewing a non-chat page
 
 // CSS STYLING:
 // Custom CSS can be added easily in TheLounge > Settings > Appearance.
@@ -621,6 +621,23 @@
         }
     }
 
+    // Start monitoring vue router to reinit after viewing settings or editing/adding a new network
+    async function initializeRouterMonitor () {
+        const router = Array.from(document.querySelectorAll('*'))
+                .find(e => e.__vue_app__)?.__vue_app__?.config?.globalProperties?.$router;
+
+        if (router == null) {
+            return setTimeout(initializeRouterMonitor, 1000);
+        }
+        await router.isReady();
+
+        router.afterEach((newRoute, oldRoute) => {
+            if (oldRoute.name === 'RoutedChat' || newRoute.name !== 'RoutedChat') return
+            initializeObserver();
+        });
+    }
+
     // Start the initialization process
+    initializeRouterMonitor();
     initializeObserver();
 })();

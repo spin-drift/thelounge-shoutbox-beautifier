@@ -45,7 +45,7 @@ This is a reworked version of [fulcrum's original script](https://paste.passtheh
 - **2.4** - Update ULCX matchers
 - **2.5** - Add ANT support
 - **2.6** - Add RFX support, enable DP and HHD support, fix ANT/BHD support
-- **2.7** - Enable OE+ support, fix config indents
+- **2.7** - Enable OE+ support, fix config indents, fixes script breaking after viewing a non-chat page
 
 
 ## CSS Styling
