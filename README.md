@@ -42,6 +42,11 @@ This is a reworked version of [fulcrum's original script](https://paste.passtheh
 - **2.1** - Sanitize zero-width characters (fixes HUNO Discord handler)
 - **2.2** - Add option to hide join/quit messages, add TheLounge icon to Tampermonkey
 - **2.3** - Add color matching - bridged usernames get proper TheLounge colors
+- **2.4** - Update ULCX matchers
+- **2.5** - Add ANT support
+- **2.6** - Add RFX support, enable DP and HHD support, fix ANT/BHD support
+- **2.7** - Enable OE+ support, fix config indents
+
 
 ## CSS Styling
 
@@ -60,8 +65,8 @@ attr(data-bridged) /* retrieves the embedded metadata prefix (e.g., 'SB') */
 Italicize all bridged usernames:
 
 ```css
-span[data-bridged] { 
-  font-style: italic; 
+span[data-bridged] {
+  font-style: italic;
 }
 ```
 
