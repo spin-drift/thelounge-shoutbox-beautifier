@@ -1,643 +1,453 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.7
-// @description  Reformats chatbot relay messages to appear as direct user messages
+// @version      3.0-alpha
+// @description  Reformats chatbot relay messages to appear as direct user messages; resilient to rerenders/route changes/virtualization
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
 // @icon         https://thelounge.chat/favicon.ico
 // @grant        none
 // ==/UserScript==
 
-// This is a reworked version of the original script that adds:
-// - Handler architecture: Makes it easier to add new formats
-// - Custom decorators: Set a prefix/suffix for bridged usernames
-// - DOM metadata: Completely customize appearance with TheLounge theme CSS
-// - Regex matcher support: Pair with custom handlers to do almost anything
-// - Preview support: Surgical DOM modification preserves link previews and event listeners
-// - More handlers: BHD, extensive HUNO support
-// - Nick coloring: Bridged usernames get proper TheLounge colors instead of inheriting bot colors
-
-// CREDITS:
-// fulcrum: Original script (https://aither.cc/forums/topics/3874)
-// marks: Autocomplete enablement (https://aither.cc/forums/topics/3874/posts/32274)
-
-// INSTALLATION:
-// - Install Tampermonkey or a compatible userscript manager
-// - Create a new script and paste this in
-// - Set @match to the IP or domain you access TheLounge on
-
-// TROUBLESHOOTING:
-// - Make sure @match is set to your TheLounge domain, in the same format as:
-//     *://your-thelounge-domain.com/*
-// - Try disabling autocomplete (USE_AUTOCOMPLETE: false)
-// - Check the browser console for errors
-// - When in doubt, simply refresh the page
-
-// CHANGELOG:
-// - 1.0 - (spindrift) Initial release
-// - 2.0 - (spindrift) Fix link previews, change return structure to add `modifyContent` and `prefixToRemove`
-// - 2.1 - (spindrift) Sanitize zero-width characters (fixes HUNO Discord handler)
-// - 2.2 - (sparrow) Add option to hide join/quit messages, add TheLounge icon to Tampermonkey
-// - 2.3 - (spindrift) Add color matching - bridged usernames get proper TheLounge colors
-// - 2.4 - (AnabolicsAnonymous) Update ULCX matchers
-// - 2.5 - (spindrift) Add ANT support (thanks JCDenton for initial work)
-// - 2.6 - (FortKnox1337) Add RFX support, enable DP and HHD support, fix ANT/BHD support (thanks!!)
-// - 2.7 - (cmd430) Enable OE+ support, fix config indents, fixes script breaking after viewing a non-chat page
-
-// CSS STYLING:
-// Custom CSS can be added easily in TheLounge > Settings > Appearance.
-// You can use the following CSS selectors to target bridged messages in your themes:
-// - span[data-bridged] selects the usernames of all bridged messages
-// - span[data-bridged-channel] selects bridged messages from specific channels
-// - attr(data-bridged) retrieves the embedded metadata prefix (e.g., 'SB')
-//
-//   Examples:
-//   - Italicize all bridged usernames:
-//     span[data-bridged] { font-style: italic; }
-//
-//   - Show HUNO Discord ranks in tiny text before username, only in #huno* channels:
-//     span[data-bridged-channel~="#huno"]:before {
-//       content: attr(data-bridged);
-//       font-size: 8px;
-//       margin-right: 5px;
-//     }
-
 (function () {
-    'use strict';
-
-    // --- YOU CAN START EDITING STUFF HERE ---
-
-    const CONFIG = {
-        // Add chatbot nicks here, including operator (~, @, etc.)
-        // Can also add regex patterns for more complex matches
-        // NOTE: A hit from any matcher will run all handlers
-        MATCHERS: [
-            'Chatbot',          // ATH
-            '%ULCX',            // ULCX
-            '@Willie',          // BHD
-            '@WALL-E',          // RFX
-            'BBot', '@BBot',    // HHD
-            '&darkpeers',       // DP
-            'Bot',              // LST
-            '+Mellos',          // HUNO (Discord)
-            /.+?-web/,          // HUNO (Shoutbox)
-            '&Sauron',          // ANT
-            '+bridgebot',       // OE+
-        ],
-        USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
-        USE_DECORATORS: true,   // Enable username decorators
-        REMOVE_JOIN_QUIT: false,// Removes join/quit messages
-        DECORATOR_L: '(',       // Will be prepended to username
-        DECORATOR_R: ')',       // Will be appended to username
-        METADATA: 'SB',         // Default metadata to be inserted into HTML
-    }
-
-    // FORMAT HANDLERS:
-    // Easily add support for new formats, just copy an existing handler and modify it
-    //
-    // Tips for writing regex matches:
-    // - Make sure you check msg.text, not msg.html
-    // - Always include the entire (non-prefix) message in a capture group: (.*)$
-    // - regex101.com is a great resource for interactive debugging
-    //
-    // If you're rolling your own custom handler, please note...
-    //
-    // Handlers should be formatted as objects with the structure:
-    // - enabled: true/false to enable/disable
-    // - handler: function that takes a message object and returns:
-    //   { username, modifyContent, prefixToRemove, metadata } or null if no match
-    //   - username: what to show the person's nick as
-    //   - modifyContent: true to remove prefix from message content, false for username-only changes
-    //   - prefixToRemove: text to remove from message (only needed if modifyContent is true)
-    //   - metadata: string to insert into HTML for CSS targeting (or default to CONFIG.METADATA)
-    //
-    // Handler functions should make use of the `msg` object, which contains:
-    // - text: textContent of message
-    // - html: innerHTML of message
-    // - from: sender of message (usually the chatbot)
-    // - chan: channel message was received in
-    //
-    // Helper functions available:
-    // - removeMatchedPrefix(match): automatically calculates prefix to remove from regex match
-    // - removeAllExceptMessage(text, messageText): removes everything before the message text
-    //
-    // Other handler notes:
-    // - Handlers should return null if no match, so the next handler can be tried
-    // - Handlers are processed in order, so more general handlers should be placed later
-    // - Handlers can be disabled by setting `enabled: false`
-
-    // HELPER FUNCTIONS for handlers:
-    // Makes it easy to calculate what prefix to remove without complex string manipulation
-
-    // For most bridged message formats - automatically calculates prefix from regex match
-    function removeMatchedPrefix(match) {
-        const fullMatch = match[0];
-        const messageText = match[match.length - 1]; // Last capture group = message
-        const prefixEnd = fullMatch.lastIndexOf(messageText);
-        return fullMatch.substring(0, prefixEnd);
-    }
-
-    // For when you want to remove everything except the message text
-    function removeAllExceptMessage(text, messageText) {
-        const messageStart = text.lastIndexOf(messageText);
-        return text.substring(0, messageStart);
-    }
-
-    const HANDLERS = [
-        {
-            // Format: [SB] Nickname: Message or [ SB ] (Nickname): Message
-            // Used at: BHD, ANT
-
-            enabled: true,
-            handler: function (msg) {
-                const match = msg.text.match(/^\s?\[\s?SB\s?\]\s+\(?([^):]+)\)?:\s*(.*)$/);
-                if (!match) return null;
-
-                return {
-                    username: match[1],
-                    modifyContent: true,
-                    prefixToRemove: removeMatchedPrefix(match),
-                    metadata: CONFIG.METADATA
-                };
-            }
-        },
-        {
-            // Format: [Chatbox] Nickname: Message
-            // Used at: RFX
-
-            enabled: true,
-            handler: function (msg) {
-                const match = msg.text.match(/^\[Chatbox\]\s+([^:]+):\s*(.*)$/);
-                if (!match) return null;
-
-                return {
-                    username: match[1],
-                    modifyContent: true,
-                    prefixToRemove: removeMatchedPrefix(match),
-                    metadata: CONFIG.METADATA
-                };
-            }
-        },
-        {
-            // Format: »Username« Message or »Username (Rank)« Message
-            // Used at: HUNO (Discord bridge)
-
-            enabled: true,
-            handler: function (msg) {
-                const HANDLER_CONFIG = {
-                    REMOVE_RANK: true,  // Splits out rank from username into metadata
-                    ABBREVIATE_RANK: true,  // Abbreviates rank (REMOVE_RANK must be set)
-                    FORCE_ABBREVIATE: false  // Always abbreviates rank, even if it's only one word
-                };
-
-                // Clean zero-width characters from the text before processing
-                const cleanText = msg.text.replace(/[\u200B-\u200D\uFEFF]/g, '');
-
-                // Two-step approach: try « format first, then space format
-                let match = cleanText.match(/^»([^«]+)«\s*(.*)$/);
-                if (!match) {
-                    // If no « found, try space-separated format (non-greedy to stop at first space)
-                    match = cleanText.match(/^»(\S+(?:\s+\([^)]+\))?)\s+(.*)$/);
-                }
-                if (!match) return null;
-
-                // Abbreviates rank if needed
-                // If ABBREVIATE_RANK is true, it will abbreviate ranks like "White Walkers" to "WW"
-                function abbreviateRank(rank) {
-                    const caps = rank.match(/[A-Z]/g);
-                    if (!caps) return '';
-                    if (!HANDLER_CONFIG.FORCE_ABBREVIATE && caps.length === 1) return rank;
-                    return caps.join('');
-                }
-
-                let rawUsername = match[1]; // The full username with potential rank
-                let extractedUsername, metadata = '';
-
-                if (HANDLER_CONFIG.REMOVE_RANK && rawUsername.endsWith(')')) { // Check if it ends with a rank in parentheses
-                    const rankMatch = rawUsername.match(/^(.*)\s+\(([^)]+)\)$/); // Match "Username (Rank)"
-                    if (rankMatch) {
-                        extractedUsername = rankMatch[1].trim(); // Username without rank
-                        const rank = rankMatch[2]; // Extracted rank
-                        metadata = HANDLER_CONFIG.ABBREVIATE_RANK ? abbreviateRank(rank) : rank; // Abbreviated rank
-                    } else {
-                        extractedUsername = rawUsername.trim();
-                    }
-                } else {
-                    extractedUsername = rawUsername.trim();
-                }
-
-                return {
-                    username: extractedUsername,
-                    modifyContent: true,
-                    prefixToRemove: removeMatchedPrefix(match),
-                    metadata
-                };
-            }
-        },
-        {
-            // Format: <Username-web> Message
-            // Used at: HUNO (Shoutbox bridge)
-
-            enabled: true,
-            handler: function (msg) {
-                // Only apply this handler for HUNO channels
-                if (!msg.chan.startsWith('#huno')) return null;
-                if (msg.from.endsWith('-web')) {
-                    // Remove '-web' suffix for HUNO shoutbox users
-                    return {
-                        username: msg.from.slice(0, -4),
-                        modifyContent: false, // Username-only transformation
-                        metadata: CONFIG.METADATA
-                    }
-                }
-                return null;
-            }
-        },
-        {
-            // Format: [Nickname] Message or [Nickname]: Message
-            // Used at: ATH, DP, ULCX, HHD, LST
-
-            enabled: true,
-            handler: function (msg) {
-                const match = msg.text.match(/^\[([^\]]+)\](?::\s*|\s+)(.*)$/);
-                if (!match) return null;
-
-                return {
-                    username: match[1],
-                    modifyContent: true,
-                    prefixToRemove: removeMatchedPrefix(match),
-                    metadata: CONFIG.METADATA
-                };
-            }
-        }
-    ];
-
-    // --- STOP EDITING STUFF HERE ---
-
-    // SURGICAL DOM MODIFICATION FUNCTIONS:
-    // These functions modify message content while preserving event listeners and preview functionality
-
-    function findPrefixTextNodes(contentSpan, prefixText) {
-        // Find all text nodes that contain the prefix we want to remove
-        const walker = document.createTreeWalker(
-            contentSpan,
-            NodeFilter.SHOW_TEXT,
-            null,
-            false
-        );
-
-        let accumulatedText = '';
-        const nodesToProcess = [];
-        let textNode;
-
-        // Walk through text nodes until we've found all the prefix text
-        while (textNode = walker.nextNode()) {
-            const nodeText = textNode.textContent;
-            nodesToProcess.push({
-                node: textNode,
-                text: nodeText,
-                accumulatedLength: accumulatedText.length
-            });
-
-            accumulatedText += nodeText;
-
-            // Stop when we have enough text to contain the full prefix
-            if (accumulatedText.length >= prefixText.length) {
-                break;
-            }
-        }
-
-        return { nodesToProcess, accumulatedText };
-    }
-
-    function removePrefixSurgically(contentSpan, prefixText) {
-        // Surgically remove prefix text while preserving all DOM structure and event listeners
-        const { nodesToProcess, accumulatedText } = findPrefixTextNodes(contentSpan, prefixText);
-
-        // Clean zero-width characters from accumulated text for comparison
-        // This ensures we match the same cleaned text that handlers worked with
-        const cleanedAccumulatedText = accumulatedText.replace(/[\u200B-\u200D\uFEFF]/g, '');
-
-        // Verify we found the expected prefix (after cleaning)
-        if (!cleanedAccumulatedText.startsWith(prefixText)) {
-            console.warn('Surgical removal failed - could not find expected prefix:', prefixText);
-            console.warn('Looking for:', JSON.stringify(prefixText));
-            console.warn('Found in DOM:', JSON.stringify(cleanedAccumulatedText.substring(0, prefixText.length + 10)));
-            return false;
-        }
-
-        // We need to account for zero-width characters when calculating removal length
-        // Calculate how much to remove from the original (uncleaned) text
-        let remainingToRemove = prefixText.length;
-        let cleanedCharsProcessed = 0;
-
-        // Process each text node to remove the prefix
-        for (const { node, text } of nodesToProcess) {
-            if (cleanedCharsProcessed >= prefixText.length) break;
-
-            // Clean this node's text to see how much of the prefix it contains
-            const cleanedNodeText = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
-            const cleanedNodeLength = cleanedNodeText.length;
-
-            // Calculate how much of the cleaned prefix this node represents
-            const cleanedCharsInThisNode = Math.min(cleanedNodeLength, prefixText.length - cleanedCharsProcessed);
-            cleanedCharsProcessed += cleanedCharsInThisNode;
-
-            if (cleanedCharsInThisNode === cleanedNodeLength) {
-                // This entire node's cleaned content is part of the prefix - remove it all
-                node.textContent = '';
-            } else {
-                // This node contains the end of the prefix
-                // We need to find where the prefix ends in the original (uncleaned) text
-                let originalCharsToRemove = 0;
-                let cleanedCount = 0;
-
-                for (let i = 0; i < text.length && cleanedCount < cleanedCharsInThisNode; i++) {
-                    const char = text[i];
-                    originalCharsToRemove++;
-
-                    // Count non-zero-width characters
-                    if (!/[\u200B-\u200D\uFEFF]/.test(char)) {
-                        cleanedCount++;
-                    }
-                }
-
-                node.textContent = text.substring(originalCharsToRemove);
-                break; // We're done
-            }
-        }
-
-        // Clean up empty text nodes and their containers
-        cleanupEmptyNodes(contentSpan);
-
-        return true;
-    }
-
-    function cleanupEmptyNodes(contentSpan) {
-        // Remove empty text nodes
-        const walker = document.createTreeWalker(
-            contentSpan,
-            NodeFilter.SHOW_TEXT,
-            null,
-            false
-        );
-
-        const emptyTextNodes = [];
-        let textNode;
-
-        while (textNode = walker.nextNode()) {
-            if (textNode.textContent === '') {
-                emptyTextNodes.push(textNode);
-            }
-        }
-
-        emptyTextNodes.forEach(node => node.remove());
-
-        // Remove empty span elements that only contained removed text
-        // Be careful not to remove spans that might be important for styling or functionality
-        const emptySpans = contentSpan.querySelectorAll('span:empty');
-        emptySpans.forEach(span => {
-            // Only remove spans that don't have important classes
-            const classes = span.className;
-            const importantClasses = ['preview-size', 'toggle-button', 'user', 'irc-fg', 'irc-bg'];
-            const hasImportantClass = importantClasses.some(cls => classes.includes(cls));
-
-            if (!hasImportantClass) {
-                span.remove();
-            }
-        });
-    }
-
-    // Run through format handlers to find a match
-    // Returns { username, modifyContent, prefixToRemove, metadata } or null if no match
-    function runFormatHandlers(msg) {
-        for (const formatHandler of HANDLERS) {
-            if (!formatHandler.enabled) continue; // Skip disabled handlers
-            const result = formatHandler.handler(msg);
-            if (result) {
-                return result;
-            }
-        }
-        return null;
-    }
-
-    // Insert username into Vue store for autocomplete
-    // By marks: https://aither.cc/forums/topics/3874/posts/32274
-    function addUserToAutocomplete(username) {
-        try {
-            const state = Array.from(document.querySelectorAll('*'))
-                .find(e => e.__vue_app__)?.__vue_app__?.config?.globalProperties?.$store?.state;
-
-            if (!state?.activeChannel?.channel?.users) return;
-
-            const users = state.activeChannel.channel.users;
-            if (!users.find(u => u.nick === username)) {
-                users.push({ nick: username, modes: [], lastMessage: Date.now() });
-            }
-        } catch (error) {
-            console.warn('Could not add user ' + username + ' for autocomplete:', error);
-        }
-    }
-
-    // COLOR MATCHING FUNCTIONS:
-    // Handle color assignment for bridged usernames
-
-    function findUserInUserlist(username) {
-        // Find user in the DOM userlist, accounting for IRC mode symbols (@, +, !, etc.)
-        const userlistUsers = document.querySelectorAll('.userlist .user[data-name]');
-
-        for (const userElement of userlistUsers) {
-            const dataName = userElement.getAttribute('data-name');
-            if (dataName === username) {
-                return userElement;
-            }
-        }
-        return null;
-    }
-
-    function getUserColor(username) {
-        // Get the color class for a username, either from existing userlist or by adding them first
-        let userElement = findUserInUserlist(username);
-
-        if (!userElement) {
-            // User not found in userlist, add them to autocomplete which should also add to DOM
-            addUserToAutocomplete(username);
-
-            // Try again after adding - give it a moment to update the DOM
-            setTimeout(() => {
-                userElement = findUserInUserlist(username);
-                if (userElement) {
-                    return extractColorClass(userElement);
-                }
-            }, 50);
-
-            // If still not found, return null and we'll try again later
-            return null;
-        }
-
-        return extractColorClass(userElement);
-    }
-
-    function extractColorClass(userElement) {
-        // Extract the color-X class from a user element
-        const classes = userElement.className.split(' ');
-        const colorClass = classes.find(cls => cls.startsWith('color-'));
-        return colorClass || null;
-    }
-
-    function applyColorToMessage(fromSpan, colorClass) {
-        // Apply the color class to the message's fromSpan
-        if (colorClass) {
-            // Remove any existing color classes
-            const classes = fromSpan.className.split(' ');
-            const filteredClasses = classes.filter(cls => !cls.startsWith('color-'));
-            // Add the new color class
-            filteredClasses.push(colorClass);
-            fromSpan.className = filteredClasses.join(' ');
-        }
-    }
-
-    // Called on page load to process any shoutbox messages already present,
-    // before the observer starts watching for new messages
-    function processExistingMessages() {
-        const messages = document.querySelectorAll('.msg'); // Select all message elements
-        messages.forEach(processMessage); // Process each message
-    }
-
-    // Check if a nick matches any bot pattern (string or regex)
-    function matcherMatches(username) {
-        return CONFIG.MATCHERS.some(pattern =>
-            typeof pattern === 'string'
-                ? pattern === username
-                : pattern instanceof RegExp && pattern.test(username)
-        );
-    }
-
-    // Called by the MutationObserver for each new message
-    function processMessage(messageElement) {
-
-        // Removes join/quit messages, if configured
-        // If you'd like to do this in pure CSS instead, use:
-        // div[data-type=join], div[data-type=quit], div[data-type=condensed] { display: none !important; }
-        if (CONFIG.REMOVE_JOIN_QUIT) {
-            if (!!messageElement.matches('div[data-type="condensed"],div[data-type="join"],div[data-type="quit"]')) {
-                messageElement.style.display = 'none'; // Hide join/quit messages
-                return;
-            }
+  'use strict';
+
+  // ---------- CONFIG ----------
+  const CONFIG = {
+    MATCHERS: [
+      'Chatbot',          // ATH
+      '%ULCX',            // ULCX
+      '@Willie',          // BHD
+      'Bot',              // LST
+      '+Mellos',          // HUNO (Discord)
+      /.+?-web/,          // HUNO (Shoutbox)
+      '&Sauron',          // ANT
+    ],
+    USE_AUTOCOMPLETE: true,
+    USE_DECORATORS: true,
+    REMOVE_JOIN_QUIT: false,
+    DECORATOR_L: '(',
+    DECORATOR_R: ')',
+    METADATA: 'SB',
+    SAFETY_SWEEP_MS: 2000, // periodic reconciliation
+  };
+
+  // ---------- UTIL / STATE ----------
+  const processed = new Map(); // key: msg id OR element, value: signature
+  const digest = (s) => s ? (s.length + '|' + s.charCodeAt(0) + '|' + s.charCodeAt(s.length - 1)) : '0';
+  const qmt = (cb) => (window.queueMicrotask ? queueMicrotask(cb) : Promise.resolve().then(cb));
+
+  function getMsgKey(el) {
+    // Prefer stable id (TheLounge uses id="msg-12345"), fallback to the element itself
+    return el.id || el;
+  }
+
+  function alreadyBeautified(el) { return el.dataset.beautified === '1'; }
+  function markBeautified(el) { el.dataset.beautified = '1'; }
+
+  // ---------- HANDLERS (unchanged) ----------
+  function removeMatchedPrefix(match) {
+    const fullMatch = match[0];
+    const messageText = match[match.length - 1];
+    const prefixEnd = fullMatch.lastIndexOf(messageText);
+    return fullMatch.substring(0, prefixEnd);
+  }
+  function removeAllExceptMessage(text, messageText) {
+    const messageStart = text.lastIndexOf(messageText);
+    return text.substring(0, messageStart);
+  }
+
+  const HANDLERS = [
+    {
+      // [SB] Nickname: Message  |  [ SB ] (Nickname): Message
+      enabled: true,
+      handler: function (msg) {
+          
+        const match = msg.text.match(/^\s?\[\s?SB\s?\]\s+\(?([^):]+)\)?:\s*(.*)$/);
+        if (!match) return null;
+        return {
+          username: match[1],
+          modifyContent: true,
+          prefixToRemove: removeMatchedPrefix(match),
+          metadata: CONFIG.METADATA
         };
+      }
+    },
+    {
+      // »Username« Message  |  »Username (Rank)« Message
+      enabled: true,
+      handler: function (msg) {
+        const HANDLER_CONFIG = {
+          REMOVE_RANK: true,
+          ABBREVIATE_RANK: true,
+          FORCE_ABBREVIATE: false
+        };
+        const cleanText = msg.text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+        let match = cleanText.match(/^»([^«]+)«\s*(.*)$/);
+        if (!match) match = cleanText.match(/^»(\S+(?:\s+\([^)]+\))?)\s+(.*)$/);
+        if (!match) return null;
 
-        // Get the username
-        const fromSpan = messageElement.querySelector('.from .user');
-        const initialUsername = fromSpan ? fromSpan.textContent : '';
-
-        // Only parse and reformat if a matcher matches the username
-        if (!initialUsername || !matcherMatches(initialUsername)) return;
-
-        // Get the channel (from the closest ancestor with data-current-channel)
-        const channel = messageElement.closest('[data-current-channel]')?.getAttribute('data-current-channel');
-
-        // Get the message contents
-        const contentSpan = messageElement.querySelector('.content'); // Select the content span
-        if (!contentSpan) return;
-
-        // Parse the message using format handlers
-        const parsed = runFormatHandlers({
-            text: contentSpan.textContent,
-            html: contentSpan.innerHTML,
-            from: initialUsername,
-            chan: channel
-        });
-        // If no handler matched, do nothing
-        if (!parsed) return;
-
-        // Destructure parsed result
-        const { username, modifyContent, prefixToRemove, metadata } = parsed;
-
-        // Check if username changed - if so, we need to handle color matching
-        const usernameChanged = (username !== initialUsername);
-
-        // Add and modify message metadata
-        fromSpan.setAttribute('data-name', username);
-        fromSpan.setAttribute('data-bridged', metadata); // For CSS targeting
-        fromSpan.setAttribute('data-bridged-channel', channel); // For CSS targeting
-
-        // Add user to autocomplete
-        if (CONFIG.USE_AUTOCOMPLETE) { addUserToAutocomplete(username); }
-
-        // Handle color matching if username changed
-        if (usernameChanged) {
-            const colorClass = getUserColor(username);
-            if (colorClass) {
-                applyColorToMessage(fromSpan, colorClass);
-            } else {
-                // Color not available yet, try again after a delay
-                setTimeout(() => {
-                    const retryColorClass = getUserColor(username);
-                    if (retryColorClass) {
-                        applyColorToMessage(fromSpan, retryColorClass);
-                    }
-                }, 200);
-            }
+        function abbreviateRank(rank) {
+          const caps = rank.match(/[A-Z]/g);
+          if (!caps) return '';
+          if (!HANDLER_CONFIG.FORCE_ABBREVIATE && caps.length === 1) return rank;
+          return caps.join('');
         }
 
-        // Update the username
-        if (CONFIG.USE_DECORATORS) {
-            fromSpan.textContent = CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R;
+        let rawUsername = match[1];
+        let extractedUsername, metadata = '';
+
+        if (HANDLER_CONFIG.REMOVE_RANK && rawUsername.endsWith(')')) {
+          const rankMatch = rawUsername.match(/^(.*)\s+\(([^)]+)\)$/);
+          if (rankMatch) {
+            extractedUsername = rankMatch[1].trim();
+            const rank = rankMatch[2];
+            metadata = HANDLER_CONFIG.ABBREVIATE_RANK ? abbreviateRank(rank) : rank;
+          } else {
+            extractedUsername = rawUsername.trim();
+          }
         } else {
-            fromSpan.textContent = username;
+          extractedUsername = rawUsername.trim();
         }
 
-        // Update the message content using surgical approach or skip content modification
-        if (modifyContent && prefixToRemove) {
-            // Use surgical DOM modification to preserve event listeners and preview functionality
-            const success = removePrefixSurgically(contentSpan, prefixToRemove);
-            if (!success) {
-                console.warn('Surgical prefix removal failed for message from:', username);
-            }
+        return {
+          username: extractedUsername,
+          modifyContent: true,
+          prefixToRemove: removeMatchedPrefix(match),
+          metadata
+        };
+      }
+    },
+    {
+      // <Username-web> Message (HUNO shoutbox)
+      enabled: true,
+      handler: function (msg) {
+        if (!msg.chan || !msg.chan.startsWith('#huno')) return null;
+        if (msg.from && msg.from.endsWith('-web')) {
+          return {
+            username: msg.from.slice(0, -4),
+            modifyContent: false,
+            metadata: CONFIG.METADATA
+          };
         }
-        // If modifyContent is false, we only transform the username and leave content untouched
+        return null;
+      }
+    },
+    {
+      // [Nickname] Message | [Nickname]: Message
+      enabled: true,
+      handler: function (msg) {
+        const match = msg.text.match(/^\[([^\]]+)\](?::\s*|\s+)(.*)$/);
+        if (!match) return null;
+        return {
+          username: match[1],
+          modifyContent: true,
+          prefixToRemove: removeMatchedPrefix(match),
+          metadata: CONFIG.METADATA
+        };
+      }
     }
+  ];
 
-    // Create and start observing DOM changes
-    const observer = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-            mutation.addedNodes.forEach((node) => {
-                if (node.nodeType === 1 && node.classList.contains('msg')) {
-                    processMessage(node);
-                }
-            });
-        });
+  function runFormatHandlers(msg) {
+    for (const fh of HANDLERS) {
+      if (!fh.enabled) continue;
+      const res = fh.handler(msg);
+      if (res) return res;
+    }
+    return null;
+  }
+
+  // ---------- SURGICAL CONTENT EDIT ----------
+  function findPrefixTextNodes(contentSpan, prefixText) {
+    const walker = document.createTreeWalker(contentSpan, NodeFilter.SHOW_TEXT, null, false);
+    let accumulatedText = '';
+    const nodesToProcess = [];
+    let textNode;
+    while (textNode = walker.nextNode()) {
+      const nodeText = textNode.textContent;
+      nodesToProcess.push({ node: textNode, text: nodeText, accumulatedLength: accumulatedText.length });
+      accumulatedText += nodeText;
+      if (accumulatedText.length >= prefixText.length) break;
+    }
+    return { nodesToProcess, accumulatedText };
+  }
+
+  function cleanupEmptyNodes(contentSpan) {
+    const walker = document.createTreeWalker(contentSpan, NodeFilter.SHOW_TEXT, null, false);
+    const emptyTextNodes = [];
+    let textNode;
+    while (textNode = walker.nextNode()) if (textNode.textContent === '') emptyTextNodes.push(textNode);
+    emptyTextNodes.forEach(node => node.remove());
+    const emptySpans = contentSpan.querySelectorAll('span:empty');
+    emptySpans.forEach(span => {
+      const classes = span.className || '';
+      const important = ['preview-size', 'toggle-button', 'user', 'irc-fg', 'irc-bg'];
+      if (!important.some(cls => classes.includes(cls))) span.remove();
     });
+  }
 
-    // Start observing when the chat container is available
-    function initializeObserver() {
-        const chatContainer = document.querySelector('#chat');
-        if (chatContainer) {
-            observer.observe(chatContainer, { childList: true, subtree: true });
-            processExistingMessages();
-        } else {
-            setTimeout(initializeObserver, 1000);
+  function removePrefixSurgically(contentSpan, prefixText) {
+    const { nodesToProcess, accumulatedText } = findPrefixTextNodes(contentSpan, prefixText);
+    const cleanedAccum = accumulatedText.replace(/[\u200B-\u200D\uFEFF]/g, '');
+    if (!cleanedAccum.startsWith(prefixText)) {
+      console.warn('Surgical removal failed - could not find expected prefix:', prefixText);
+      return false;
+    }
+    let cleanedCharsProcessed = 0;
+    for (const { node, text } of nodesToProcess) {
+      if (cleanedCharsProcessed >= prefixText.length) break;
+      const cleanedNodeText = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+      const take = Math.min(cleanedNodeText.length, prefixText.length - cleanedCharsProcessed);
+      cleanedCharsProcessed += take;
+
+      if (take === cleanedNodeText.length) {
+        node.textContent = '';
+      } else {
+        let originalCharsToRemove = 0, cleanedCount = 0;
+        for (let i = 0; i < text.length && cleanedCount < take; i++) {
+          const ch = text[i];
+          originalCharsToRemove++;
+          if (!/[\u200B-\u200D\uFEFF]/.test(ch)) cleanedCount++;
         }
+        node.textContent = text.substring(originalCharsToRemove);
+        break;
+      }
+    }
+    cleanupEmptyNodes(contentSpan);
+    return true;
+  }
+
+  // ---------- STORE / COLOR ----------
+  function addUserToAutocomplete(username) {
+    try {
+      const state = Array.from(document.querySelectorAll('*'))
+        .find(e => e.__vue_app__)?.__vue_app__?.config?.globalProperties?.$store?.state;
+      if (!state?.activeChannel?.channel?.users) return;
+      const users = state.activeChannel.channel.users;
+      if (!users.find(u => u.nick === username)) {
+        users.push({ nick: username, modes: [], lastMessage: Date.now() });
+      }
+    } catch (e) {
+      console.warn('Could not add user for autocomplete:', e);
+    }
+  }
+  function findUserInUserlist(username) {
+    const userlistUsers = document.querySelectorAll('.userlist .user[data-name]');
+    for (const userElement of userlistUsers) {
+      if (userElement.getAttribute('data-name') === username) return userElement;
+    }
+    return null;
+  }
+  function extractColorClass(userElement) {
+    const classes = (userElement.className || '').split(' ');
+    return classes.find(cls => cls.startsWith('color-')) || null;
+  }
+  function getUserColor(username) {
+    let userElement = findUserInUserlist(username);
+    if (!userElement) {
+      addUserToAutocomplete(username);
+      setTimeout(() => {
+        userElement = findUserInUserlist(username);
+        if (userElement) return extractColorClass(userElement);
+      }, 50);
+      return null;
+    }
+    return extractColorClass(userElement);
+  }
+  function applyColorToMessage(fromSpan, colorClass) {
+    if (!colorClass) return;
+    const classes = (fromSpan.className || '').split(' ').filter(Boolean);
+    const filtered = classes.filter(cls => !cls.startsWith('color-'));
+    filtered.push(colorClass);
+    fromSpan.className = filtered.join(' ');
+  }
+
+  // ---------- CORE PROCESSOR ----------
+  function matcherMatches(username) {
+    return CONFIG.MATCHERS.some(p =>
+      typeof p === 'string' ? p === username : (p instanceof RegExp && p.test(username))
+    );
+  }
+
+  function processMessage(messageElement) {
+    // Remove join/quit if configured
+    if (CONFIG.REMOVE_JOIN_QUIT) {
+      if (messageElement.matches?.('div[data-type="condensed"],div[data-type="join"],div[data-type="quit"]')) {
+        messageElement.style.display = 'none';
+        markBeautified(messageElement);
+        return;
+      }
     }
 
-    // Start monitoring vue router to reinit after viewing settings or editing/adding a new network
-    async function initializeRouterMonitor () {
-        const router = Array.from(document.querySelectorAll('*'))
-                .find(e => e.__vue_app__)?.__vue_app__?.config?.globalProperties?.$router;
+    const fromSpan = messageElement.querySelector?.('.from .user');
+    const contentSpan = messageElement.querySelector?.('.content');
+    const initialUsername = fromSpan?.textContent || '';
+    if (!initialUsername || !matcherMatches(initialUsername) || !contentSpan) return;
 
-        if (router == null) {
-            return setTimeout(initializeRouterMonitor, 1000);
-        }
-        await router.isReady();
+    // Guard: avoid double-stripping
+    // (We still allow re-run if text changed; that guard lives in processMessageIfNeeded)
+    if (alreadyBeautified(messageElement) && fromSpan.getAttribute('data-bridged')) return;
 
-        router.afterEach((newRoute, oldRoute) => {
-            if (oldRoute.name === 'RoutedChat' || newRoute.name !== 'RoutedChat') return
-            initializeObserver();
+    const channel = messageElement.closest?.('[data-current-channel]')?.getAttribute('data-current-channel') || '';
+
+    const parsed = runFormatHandlers({
+      text: contentSpan.textContent,
+      html: contentSpan.innerHTML,
+      from: initialUsername,
+      chan: channel
+    });
+    if (!parsed) return;
+
+    const { username, modifyContent, prefixToRemove, metadata } = parsed;
+    const usernameChanged = (username !== initialUsername);
+
+    fromSpan.setAttribute('data-name', username);
+    fromSpan.setAttribute('data-bridged', metadata || CONFIG.METADATA);
+    fromSpan.setAttribute('data-bridged-channel', channel);
+
+    if (CONFIG.USE_AUTOCOMPLETE) addUserToAutocomplete(username);
+
+    if (usernameChanged) {
+      const colorClass = getUserColor(username);
+      if (colorClass) {
+        applyColorToMessage(fromSpan, colorClass);
+      } else {
+        setTimeout(() => {
+          const retry = getUserColor(username);
+          if (retry) applyColorToMessage(fromSpan, retry);
+        }, 200);
+      }
+    }
+
+    fromSpan.textContent = CONFIG.USE_DECORATORS
+      ? CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R
+      : username;
+
+    if (modifyContent && prefixToRemove) {
+      const ok = removePrefixSurgically(contentSpan, prefixToRemove);
+      if (!ok) console.warn('Surgical prefix removal failed for:', username);
+    }
+
+    markBeautified(messageElement);
+  }
+
+  // Idempotent wrapper: only process if text/name actually changed
+  function processMessageIfNeeded(messageElement) {
+    if (!messageElement || messageElement.nodeType !== 1 || !messageElement.classList?.contains('msg')) return;
+    const fromSpan = messageElement.querySelector('.from .user');
+    const contentSpan = messageElement.querySelector('.content');
+    if (!fromSpan || !contentSpan) return;
+
+    const raw = contentSpan.textContent || '';
+    const name = fromSpan.textContent || '';
+    const sig = digest(raw) + '|' + name;
+
+    const key = getMsgKey(messageElement);
+    const prev = processed.get(key);
+    if (prev === sig) return;
+
+    processMessage(messageElement);
+    processed.set(key, sig);
+  }
+
+  // ---------- OBSERVERS ----------
+  // Batch mutations to avoid thrash during heavy updates
+  let pending = new Set();
+  let scheduled = false;
+  function scheduleFlush() {
+    if (scheduled) return;
+    scheduled = true;
+    qmt(() => {
+      pending.forEach(el => processMessageIfNeeded(el));
+      pending.clear();
+      observeVisibilityForAll(); // ensure new rows get viewport hooks
+      scheduled = false;
+    });
+  }
+
+  const domObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      // New/replaced nodes
+      if (m.addedNodes) {
+        m.addedNodes.forEach(n => {
+          if (n.nodeType === 1) {
+            if (n.classList.contains('msg')) pending.add(n);
+            const inner = n.querySelectorAll?.('.msg');
+            if (inner && inner.length) inner.forEach(el => pending.add(el));
+          }
         });
+      }
+      // Attribute changes on a message row
+      if (m.type === 'attributes' && m.target.classList?.contains('msg')) {
+        pending.add(m.target);
+      }
+      // Text changes inside a message row
+      if (m.type === 'characterData') {
+        const msg = m.target.parentElement?.closest?.('.msg');
+        if (msg) pending.add(msg);
+      }
     }
+    scheduleFlush();
+  });
 
-    // Start the initialization process
-    initializeRouterMonitor();
-    initializeObserver();
+  // Re-attach observer when #chat is rebuilt (route/view changes)
+  let rootObserver = null;
+  function attachToChatRoot() {
+    const chat = document.querySelector('#chat');
+    if (!chat) return false;
+    domObserver.disconnect();
+    domObserver.observe(chat, { childList: true, subtree: true, attributes: true, characterData: true });
+
+    // Sweep current DOM once on (re)attach
+    document.querySelectorAll('.msg').forEach(processMessageIfNeeded);
+    observeVisibilityForAll();
+    return true;
+  }
+
+  function watchForChatRoot() {
+    if (attachToChatRoot()) return;
+    if (rootObserver) return;
+    rootObserver = new MutationObserver(() => attachToChatRoot());
+    rootObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') watchForChatRoot();
+  });
+  window.addEventListener('focus', watchForChatRoot);
+
+  // Touch rows when they enter the viewport (virtualized lists)
+  const inView = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) processMessageIfNeeded(e.target);
+  }, { root: document.querySelector('#chat') || null, threshold: 0 });
+
+  function observeVisibilityForAll() {
+    document.querySelectorAll('.msg').forEach(el => inView.observe(el));
+  }
+
+  // Light periodic reconciliation to catch any edge misses
+  setInterval(() => {
+    document.querySelectorAll('.msg').forEach(processMessageIfNeeded);
+  }, CONFIG.SAFETY_SWEEP_MS);
+
+  // ---------- STORE WATCH (channel switches churn DOM) ----------
+  (function watchStoreChannel() {
+    try {
+      const app = Array.from(document.querySelectorAll('*')).find(e => e.__vue_app__)?.__vue_app__;
+      const store = app?.config?.globalProperties?.$store;
+      if (store?.watch) {
+        store.watch(
+          s => s.activeChannel?.chan?.name || s.activeChannel?.channel?.name,
+          () => qmt(() => {
+            watchForChatRoot();
+            document.querySelectorAll('.msg').forEach(processMessageIfNeeded);
+          })
+        );
+      }
+    } catch { /* no-op */ }
+  })();
+
+  // ---------- BOOT ----------
+  watchForChatRoot(); // will attach when #chat appears
 })();
