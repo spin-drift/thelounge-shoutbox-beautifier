@@ -18,10 +18,14 @@
       'Chatbot',          // ATH
       '%ULCX',            // ULCX
       '@Willie',          // BHD
+      '@WALL-E',          // RFX
+      'BBot', '@BBot',    // HHD
+      '&darkpeers',       // DP
       'Bot',              // LST
       '+Mellos',          // HUNO (Discord)
       /.+?-web/,          // HUNO (Shoutbox)
       '&Sauron',          // ANT
+      '+bridgebot',       // OE+
     ],
     USE_AUTOCOMPLETE: true,
     USE_DECORATORS: true,
@@ -33,19 +37,35 @@
   };
 
   // ---------- UTIL / STATE ----------
-  const processed = new Map(); // key: msg id OR element, value: signature
+  // [LSB] Use WeakMap for elements (no leaks) + Map for id-addressable nodes
+  const byEl = new WeakMap();          // el -> signature
+  const byId = new Map();              // id string -> signature
+  const onceWarned = new Set();        // msg key -> we already logged a surgical failure
+  const visibleSet = new WeakSet();    // rows currently in viewport
+
   const digest = (s) => s ? (s.length + '|' + s.charCodeAt(0) + '|' + s.charCodeAt(s.length - 1)) : '0';
-  const qmt = (cb) => (window.queueMicrotask ? queueMicrotask(cb) : Promise.resolve().then(cb));
 
   function getMsgKey(el) {
-    // Prefer stable id (TheLounge uses id="msg-12345"), fallback to the element itself
     return el.id || el;
+  }
+  function getPrevSig(key, el) {
+    if (typeof key === 'string') return byId.get(key);
+    return byEl.get(el);
+  }
+  function setSig(key, el, sig) {
+    if (typeof key === 'string') byId.set(key, sig);
+    else byEl.set(el, sig);
+    try { el.dataset.lsbSig = sig; } catch {}
   }
 
   function alreadyBeautified(el) { return el.dataset.beautified === '1'; }
   function markBeautified(el) { el.dataset.beautified = '1'; }
 
-  // ---------- HANDLERS (unchanged) ----------
+  // ---------- HANDLERS (merged with 2.7 set) ----------
+  // Helper functions available:
+  // - removeMatchedPrefix(match): automatically calculates prefix to remove from regex match
+  // - removeAllExceptMessage(text, messageText): removes everything before the message text
+
   function removeMatchedPrefix(match) {
     const fullMatch = match[0];
     const messageText = match[match.length - 1];
@@ -59,12 +79,13 @@
 
   const HANDLERS = [
     {
-      // [SB] Nickname: Message  |  [ SB ] (Nickname): Message
+      // Format: [SB] Nickname: Message or [ SB ] (Nickname): Message
+      // Used at: BHD, ANT
       enabled: true,
       handler: function (msg) {
-          
         const match = msg.text.match(/^\s?\[\s?SB\s?\]\s+\(?([^):]+)\)?:\s*(.*)$/);
         if (!match) return null;
+
         return {
           username: match[1],
           modifyContent: true,
@@ -74,19 +95,41 @@
       }
     },
     {
-      // »Username« Message  |  »Username (Rank)« Message
+      // Format: [Chatbox] Nickname: Message
+      // Used at: RFX
+      enabled: true,
+      handler: function (msg) {
+        const match = msg.text.match(/^\[Chatbox\]\s+([^:]+):\s*(.*)$/);
+        if (!match) return null;
+
+        return {
+          username: match[1],
+          modifyContent: true,
+          prefixToRemove: removeMatchedPrefix(match),
+          metadata: CONFIG.METADATA
+        };
+      }
+    },
+    {
+      // Format: »Username« Message or »Username (Rank)« Message
+      // Used at: HUNO (Discord bridge)
       enabled: true,
       handler: function (msg) {
         const HANDLER_CONFIG = {
-          REMOVE_RANK: true,
-          ABBREVIATE_RANK: true,
-          FORCE_ABBREVIATE: false
+          REMOVE_RANK: true,      // Splits out rank from username into metadata
+          ABBREVIATE_RANK: true,  // Abbreviates rank (REMOVE_RANK must be set)
+          FORCE_ABBREVIATE: false // Always abbreviates rank, even if it's only one word
         };
+
+        // Clean zero-width characters from the text before processing
         const cleanText = msg.text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+
+        // Two-step approach: try « format first, then space format
         let match = cleanText.match(/^»([^«]+)«\s*(.*)$/);
         if (!match) match = cleanText.match(/^»(\S+(?:\s+\([^)]+\))?)\s+(.*)$/);
         if (!match) return null;
 
+        // Abbreviates rank if needed
         function abbreviateRank(rank) {
           const caps = rank.match(/[A-Z]/g);
           if (!caps) return '';
@@ -119,26 +162,31 @@
       }
     },
     {
-      // <Username-web> Message (HUNO shoutbox)
+      // Format: <Username-web> Message
+      // Used at: HUNO (Shoutbox bridge)
       enabled: true,
       handler: function (msg) {
-        if (!msg.chan || !msg.chan.startsWith('#huno')) return null;
+        // Only apply this handler for HUNO channels
+        if (!msg.chan || !String(msg.chan).startsWith('#huno')) return null;
         if (msg.from && msg.from.endsWith('-web')) {
+          // Remove '-web' suffix for HUNO shoutbox users
           return {
             username: msg.from.slice(0, -4),
-            modifyContent: false,
+            modifyContent: false, // Username-only transformation
             metadata: CONFIG.METADATA
-          };
+          }
         }
         return null;
       }
     },
     {
-      // [Nickname] Message | [Nickname]: Message
+      // Format: [Nickname] Message or [Nickname]: Message
+      // Used at: ATH, DP, ULCX, HHD, LST
       enabled: true,
       handler: function (msg) {
         const match = msg.text.match(/^\[([^\]]+)\](?::\s*|\s+)(.*)$/);
         if (!match) return null;
+
         return {
           username: match[1],
           modifyContent: true,
@@ -191,7 +239,6 @@
     const { nodesToProcess, accumulatedText } = findPrefixTextNodes(contentSpan, prefixText);
     const cleanedAccum = accumulatedText.replace(/[\u200B-\u200D\uFEFF]/g, '');
     if (!cleanedAccum.startsWith(prefixText)) {
-      console.warn('Surgical removal failed - could not find expected prefix:', prefixText);
       return false;
     }
     let cleanedCharsProcessed = 0;
@@ -271,65 +318,74 @@
   }
 
   function processMessage(messageElement) {
-    // Remove join/quit if configured
-    if (CONFIG.REMOVE_JOIN_QUIT) {
-      if (messageElement.matches?.('div[data-type="condensed"],div[data-type="join"],div[data-type="quit"]')) {
-        messageElement.style.display = 'none';
-        markBeautified(messageElement);
-        return;
+    try {
+      // Remove join/quit if configured (CSS is better; this is a fallback)
+      if (CONFIG.REMOVE_JOIN_QUIT) {
+        if (messageElement.matches?.('div[data-type="condensed"],div[data-type="join"],div[data-type="quit"]')) {
+          messageElement.style.display = 'none';
+          markBeautified(messageElement);
+          return;
+        }
       }
-    }
 
-    const fromSpan = messageElement.querySelector?.('.from .user');
-    const contentSpan = messageElement.querySelector?.('.content');
-    const initialUsername = fromSpan?.textContent || '';
-    if (!initialUsername || !matcherMatches(initialUsername) || !contentSpan) return;
+      const fromSpan = messageElement.querySelector?.('.from .user');
+      const contentSpan = messageElement.querySelector?.('.content');
+      const initialUsername = fromSpan?.textContent || '';
+      if (!initialUsername || !matcherMatches(initialUsername) || !contentSpan) return;
 
-    // Guard: avoid double-stripping
-    // (We still allow re-run if text changed; that guard lives in processMessageIfNeeded)
-    if (alreadyBeautified(messageElement) && fromSpan.getAttribute('data-bridged')) return;
+      // Guard: if we’ve already replaced with the same resulting name/prefix, skip
+      if (alreadyBeautified(messageElement) && fromSpan.getAttribute('data-bridged')) return;
 
-    const channel = messageElement.closest?.('[data-current-channel]')?.getAttribute('data-current-channel') || '';
+      const channel = messageElement.closest?.('[data-current-channel]')?.getAttribute('data-current-channel') || '';
 
-    const parsed = runFormatHandlers({
-      text: contentSpan.textContent,
-      html: contentSpan.innerHTML,
-      from: initialUsername,
-      chan: channel
-    });
-    if (!parsed) return;
+      const parsed = runFormatHandlers({
+        text: contentSpan.textContent,
+        html: contentSpan.innerHTML,
+        from: initialUsername,
+        chan: channel
+      });
+      if (!parsed) return;
 
-    const { username, modifyContent, prefixToRemove, metadata } = parsed;
-    const usernameChanged = (username !== initialUsername);
+      const { username, modifyContent, prefixToRemove, metadata } = parsed;
+      const usernameChanged = (username !== initialUsername);
 
-    fromSpan.setAttribute('data-name', username);
-    fromSpan.setAttribute('data-bridged', metadata || CONFIG.METADATA);
-    fromSpan.setAttribute('data-bridged-channel', channel);
+      fromSpan.setAttribute('data-name', username);
+      fromSpan.setAttribute('data-bridged', metadata || CONFIG.METADATA);
+      fromSpan.setAttribute('data-bridged-channel', channel);
 
-    if (CONFIG.USE_AUTOCOMPLETE) addUserToAutocomplete(username);
+      if (CONFIG.USE_AUTOCOMPLETE) addUserToAutocomplete(username);
 
-    if (usernameChanged) {
-      const colorClass = getUserColor(username);
-      if (colorClass) {
-        applyColorToMessage(fromSpan, colorClass);
-      } else {
-        setTimeout(() => {
-          const retry = getUserColor(username);
-          if (retry) applyColorToMessage(fromSpan, retry);
-        }, 200);
+      if (usernameChanged) {
+        const colorClass = getUserColor(username);
+        if (colorClass) {
+          applyColorToMessage(fromSpan, colorClass);
+        } else {
+          setTimeout(() => {
+            const retry = getUserColor(username);
+            if (retry) applyColorToMessage(fromSpan, retry);
+          }, 200);
+        }
       }
+
+      fromSpan.textContent = CONFIG.USE_DECORATORS
+        ? CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R
+        : username;
+
+      if (modifyContent && prefixToRemove) {
+        const ok = removePrefixSurgically(contentSpan, prefixToRemove);
+        if (!ok) {
+          const key = getMsgKey(messageElement);
+          if (!onceWarned.has(key)) {
+            console.warn('Surgical prefix removal failed for:', username);
+            onceWarned.add(key);
+          }
+        }
+      }
+
+      markBeautified(messageElement);
+    } catch (e) {
+      console.warn('[LSB] processMessage error:', e);
     }
-
-    fromSpan.textContent = CONFIG.USE_DECORATORS
-      ? CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R
-      : username;
-
-    if (modifyContent && prefixToRemove) {
-      const ok = removePrefixSurgically(contentSpan, prefixToRemove);
-      if (!ok) console.warn('Surgical prefix removal failed for:', username);
-    }
-
-    markBeautified(messageElement);
   }
 
   // Idempotent wrapper: only process if text/name actually changed
@@ -344,32 +400,30 @@
     const sig = digest(raw) + '|' + name;
 
     const key = getMsgKey(messageElement);
-    const prev = processed.get(key);
+    const prev = getPrevSig(key, messageElement);
     if (prev === sig) return;
 
     processMessage(messageElement);
-    processed.set(key, sig);
+    setSig(key, messageElement, sig);
   }
 
   // ---------- OBSERVERS ----------
-  // Batch mutations to avoid thrash during heavy updates
+  // [LSB] Batch via requestAnimationFrame to avoid layout thrash
   let pending = new Set();
-  let scheduled = false;
+  let rafToken = 0;
   function scheduleFlush() {
-    if (scheduled) return;
-    scheduled = true;
-    qmt(() => {
+    if (rafToken) return;
+    rafToken = requestAnimationFrame(() => {
       pending.forEach(el => processMessageIfNeeded(el));
       pending.clear();
       observeVisibilityForAll(); // ensure new rows get viewport hooks
-      scheduled = false;
+      rafToken = 0;
     });
   }
 
   const domObserver = new MutationObserver((mutations) => {
     for (const m of mutations) {
-      // New/replaced nodes
-      if (m.addedNodes) {
+      if (m.addedNodes && m.addedNodes.length) {
         m.addedNodes.forEach(n => {
           if (n.nodeType === 1) {
             if (n.classList.contains('msg')) pending.add(n);
@@ -378,11 +432,9 @@
           }
         });
       }
-      // Attribute changes on a message row
       if (m.type === 'attributes' && m.target.classList?.contains('msg')) {
         pending.add(m.target);
       }
-      // Text changes inside a message row
       if (m.type === 'characterData') {
         const msg = m.target.parentElement?.closest?.('.msg');
         if (msg) pending.add(msg);
@@ -391,15 +443,42 @@
     scheduleFlush();
   });
 
+  // Recreate IntersectionObserver when chat root changes so root is correct
+  let inView = null;
+  function makeInViewObserver(rootEl) {
+    if (inView) try { inView.disconnect(); } catch {}
+    inView = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (e.isIntersecting) {
+          visibleSet.add(e.target);
+          processMessageIfNeeded(e.target);
+        } else {
+          try { visibleSet.delete(e.target); } catch {}
+        }
+      }
+    }, { root: rootEl || null, threshold: 0 });
+  }
+
+  function observeVisibilityForAll() {
+    if (!inView) return;
+    document.querySelectorAll('.msg').forEach(el => inView.observe(el));
+  }
+
   // Re-attach observer when #chat is rebuilt (route/view changes)
   let rootObserver = null;
   function attachToChatRoot() {
     const chat = document.querySelector('#chat');
     if (!chat) return false;
-    domObserver.disconnect();
-    domObserver.observe(chat, { childList: true, subtree: true, attributes: true, characterData: true });
 
-    // Sweep current DOM once on (re)attach
+    domObserver.disconnect();
+    domObserver.observe(chat, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+
+    makeInViewObserver(chat);
+
     document.querySelectorAll('.msg').forEach(processMessageIfNeeded);
     observeVisibilityForAll();
     return true;
@@ -417,18 +496,14 @@
   });
   window.addEventListener('focus', watchForChatRoot);
 
-  // Touch rows when they enter the viewport (virtualized lists)
-  const inView = new IntersectionObserver((entries) => {
-    for (const e of entries) if (e.isIntersecting) processMessageIfNeeded(e.target);
-  }, { root: document.querySelector('#chat') || null, threshold: 0 });
-
-  function observeVisibilityForAll() {
-    document.querySelectorAll('.msg').forEach(el => inView.observe(el));
-  }
-
   // Light periodic reconciliation to catch any edge misses
   setInterval(() => {
-    document.querySelectorAll('.msg').forEach(processMessageIfNeeded);
+    const anyVisible = [];
+    document.querySelectorAll('.msg').forEach(el => {
+      if (visibleSet.has(el)) anyVisible.push(el);
+    });
+    const target = anyVisible.length ? anyVisible : document.querySelectorAll('.msg');
+    target.forEach(processMessageIfNeeded);
   }, CONFIG.SAFETY_SWEEP_MS);
 
   // ---------- STORE WATCH (channel switches churn DOM) ----------
@@ -439,13 +514,29 @@
       if (store?.watch) {
         store.watch(
           s => s.activeChannel?.chan?.name || s.activeChannel?.channel?.name,
-          () => qmt(() => {
-            watchForChatRoot();
-            document.querySelectorAll('.msg').forEach(processMessageIfNeeded);
-          })
+          () => {
+            requestAnimationFrame(() => {
+              watchForChatRoot();
+              document.querySelectorAll('.msg').forEach(processMessageIfNeeded);
+            });
+          }
         );
       }
     } catch { /* no-op */ }
+  })();
+
+  // ---------- OPTIONAL GLOBAL CSS FOR JOIN/QUIT ----------
+  (function maybeInjectJoinQuitCSS() {
+    if (!CONFIG.REMOVE_JOIN_QUIT) return;
+    if (document.querySelector('style[data-lsb-joinquit]')) return;
+    const style = document.createElement('style');
+    style.setAttribute('data-lsb-joinquit', '1');
+    style.textContent = `
+      div[data-type="join"],
+      div[data-type="quit"],
+      div[data-type="condensed"] { display: none !important; }
+    `;
+    document.documentElement.appendChild(style);
   })();
 
   // ---------- BOOT ----------
