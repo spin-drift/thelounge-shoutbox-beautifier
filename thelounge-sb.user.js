@@ -106,11 +106,10 @@
     // Handlers should be formatted as objects with the structure:
     // - enabled: true/false to enable/disable
     // - handler: function that takes a message object and returns:
-    //   { username, modifyContent, prefixToRemove, newMessage, metadata } or null if no match
+    //   { username, prefixToRemove, newMessage, metadata } or null if no match
     //   - username: what to show the person's nick as
-    //   - modifyContent: true to remove prefix from message content, false for username-only changes
-    //   - prefixToRemove: text to remove from message (only needed if modifyContent is true)
-    //   - newMessage: the new content of the message, this will override prefixToRemove (only needed if modifyContent is true)
+    //   - prefixToRemove: text to remove from message (optional)
+    //   - newMessage: the new content of the message, this will override prefixToRemove (optional)
     //   - metadata: string to insert into HTML for CSS targeting (or default to CONFIG.METADATA)
     //
     // Handler functions should make use of the `msg` object, which contains:
@@ -157,7 +156,6 @@
 
                 return {
                     username: match[1],
-                    modifyContent: true,
                     prefixToRemove: removeMatchedPrefix(match),
                     metadata: CONFIG.METADATA
                 };
@@ -174,7 +172,6 @@
 
                 return {
                     username: match[1],
-                    modifyContent: true,
                     prefixToRemove: removeMatchedPrefix(match),
                     metadata: CONFIG.METADATA
                 };
@@ -230,7 +227,6 @@
 
                 return {
                     username: extractedUsername,
-                    modifyContent: true,
                     prefixToRemove: removeMatchedPrefix(match),
                     metadata
                 };
@@ -248,7 +244,6 @@
                     // Remove '-web' suffix for HUNO shoutbox users
                     return {
                         username: msg.from.slice(0, -4),
-                        modifyContent: false, // Username-only transformation
                         metadata: CONFIG.METADATA
                     }
                 }
@@ -266,7 +261,6 @@
 
                 return {
                     username: match[1],
-                    modifyContent: true,
                     prefixToRemove: removeMatchedPrefix(match),
                     metadata: CONFIG.METADATA
                 };
@@ -411,7 +405,7 @@
     }
 
     // Run through format handlers to find a match
-    // Returns { username, modifyContent, prefixToRemove, metadata } or null if no match
+    // Returns { username, prefixToRemove, newMessage, metadata } or null if no match
     function runFormatHandlers(msg) {
         for (const formatHandler of HANDLERS) {
             if (!formatHandler.enabled) continue; // Skip disabled handlers
@@ -553,7 +547,7 @@
         if (!parsed) return;
 
         // Destructure parsed result
-        const { username, modifyContent, prefixToRemove, newMessage, metadata } = parsed;
+        const { username, prefixToRemove, newMessage, metadata } = parsed;
 
         // Check if username changed - if so, we need to change the style and text
         const usernameChanged = (username !== initialUsername);
@@ -592,7 +586,7 @@
 
 
         // Update the message content using surgical approach or skip content modification
-        if (modifyContent && prefixToRemove) {
+        if (prefixToRemove) {
             // Use surgical DOM modification to preserve event listeners and preview functionality
             const success = removePrefixSurgically(contentSpan, prefixToRemove);
             if (!success) {
@@ -601,10 +595,9 @@
         }
 
         // If handler created a completely new message, replace content
-        if (modifyContent && newMessage) {
+        if ( newMessage) {
             contentSpan.textContent = newMessage;
         }
-        // If modifyContent is false, we only transform the username and leave content untouched
     }
 
     // Create and start observing DOM changes
