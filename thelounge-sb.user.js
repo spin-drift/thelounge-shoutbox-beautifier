@@ -106,10 +106,11 @@
     // Handlers should be formatted as objects with the structure:
     // - enabled: true/false to enable/disable
     // - handler: function that takes a message object and returns:
-    //   { username, modifyContent, prefixToRemove, metadata } or null if no match
+    //   { username, modifyContent, prefixToRemove, newMessage, metadata } or null if no match
     //   - username: what to show the person's nick as
     //   - modifyContent: true to remove prefix from message content, false for username-only changes
     //   - prefixToRemove: text to remove from message (only needed if modifyContent is true)
+    //   - newMessage: the new content of the message, this will override prefixToRemove (only needed if modifyContent is true)
     //   - metadata: string to insert into HTML for CSS targeting (or default to CONFIG.METADATA)
     //
     // Handler functions should make use of the `msg` object, which contains:
@@ -552,21 +553,29 @@
         if (!parsed) return;
 
         // Destructure parsed result
-        const { username, modifyContent, prefixToRemove, metadata } = parsed;
+        const { username, modifyContent, prefixToRemove, newMessage, metadata } = parsed;
 
-        // Check if username changed - if so, we need to handle color matching
+        // Check if username changed - if so, we need to change the style and text
         const usernameChanged = (username !== initialUsername);
 
-        // Add and modify message metadata
-        fromSpan.setAttribute('data-name', username);
-        fromSpan.setAttribute('data-bridged', metadata); // For CSS targeting
-        fromSpan.setAttribute('data-bridged-channel', channel); // For CSS targeting
-
-        // Add user to autocomplete
-        if (CONFIG.USE_AUTOCOMPLETE) { addUserToAutocomplete(username); }
-
-        // Handle color matching if username changed
+        // Handle username related changes if the username has been changed
         if (usernameChanged) {
+            // Add and modify message metadata
+            fromSpan.setAttribute('data-name', username);
+            fromSpan.setAttribute('data-bridged', metadata); // For CSS targeting
+            fromSpan.setAttribute('data-bridged-channel', channel); // For CSS targeting
+
+            // Add the custom decorators
+            if (CONFIG.USE_DECORATORS) {
+                fromSpan.textContent = CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R;
+            } else {
+                fromSpan.textContent = username;
+            }
+
+            // Add user to autocomplete
+            if (CONFIG.USE_AUTOCOMPLETE) { addUserToAutocomplete(username); }
+
+            // Add the user's color
             const colorClass = getUserColor(username);
             if (colorClass) {
                 applyColorToMessage(fromSpan, colorClass);
@@ -581,12 +590,6 @@
             }
         }
 
-        // Update the username
-        if (CONFIG.USE_DECORATORS) {
-            fromSpan.textContent = CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R;
-        } else {
-            fromSpan.textContent = username;
-        }
 
         // Update the message content using surgical approach or skip content modification
         if (modifyContent && prefixToRemove) {
@@ -595,6 +598,11 @@
             if (!success) {
                 console.warn('Surgical prefix removal failed for message from:', username);
             }
+        }
+
+        // If handler created a completely new message, replace content
+        if (modifyContent && newMessage) {
+            contentSpan.textContent = newMessage;
         }
         // If modifyContent is false, we only transform the username and leave content untouched
     }
