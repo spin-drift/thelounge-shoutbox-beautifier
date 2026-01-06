@@ -1,11 +1,14 @@
 # Ultimate Shoutbox Beautifier for TheLounge
 
-**Known compatibility:** ATH, BHD, HUNO, LST, ULCX
+**Known compatibility:** ATH, ULCX, BHD, RFX, HHD, DP, LST, HUNO, ANT, OE+
 
 ## Screenshots
 
-[![Screenshot 1](https://i.badkitty.zone/4YV6xk.png)](https://i.badkitty.zone/4YV6xk.png)
-[![Screenshot 2](https://i.badkitty.zone/T3mnBU.png)](https://i.badkitty.zone/T3mnBU.png)
+#### Before / After
+<a href="https://i.badkitty.zone/usb-aither-before.png"><img src="https://i.badkitty.zone/usb-aither-before.png" width="400"></a> <a href="https://i.badkitty.zone/usb-aither-after.png"><img src="https://i.badkitty.zone/usb-aither-after.png" width="412"></a>
+
+#### HUNO support
+<a href="https://i.badkitty.zone/usb-huno.png"><img src="https://i.badkitty.zone/usb-huno.png" width="400"></a>
 
 This is a reworked version of [fulcrum's original script](https://paste.passtheheadphones.me/?ce929e1387e5bbdf#2bXLMKYHNXZu4tSdE2YkGnQvpwVA43LM3TCu7jxqEhD3) that adds:
 
