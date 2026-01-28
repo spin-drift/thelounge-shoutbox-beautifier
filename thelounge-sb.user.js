@@ -84,6 +84,7 @@
             /.+?-web/,          // HUNO (Shoutbox)
             '&Sauron',          // ANT
             '+bridgebot',       // OE+
+            'Luminarr',         // LUME
         ],
         USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
         USE_DECORATORS: true,   // Enable username decorators
@@ -106,10 +107,9 @@
     // Handlers should be formatted as objects with the structure:
     // - enabled: true/false to enable/disable
     // - handler: function that takes a message object and returns:
-    //   { username, modifyContent, prefixToRemove, metadata } or null if no match
+    //   { username, prefixToRemove, metadata } or null if no match
     //   - username: what to show the person's nick as
-    //   - modifyContent: true to remove prefix from message content, false for username-only changes
-    //   - prefixToRemove: text to remove from message (only needed if modifyContent is true)
+    //   - prefixToRemove: text to remove from message (optional)
     //   - metadata: string to insert into HTML for CSS targeting (or default to CONFIG.METADATA)
     //
     // Handler functions should make use of the `msg` object, which contains:
@@ -156,7 +156,6 @@
 
                 return {
                     username: match[1],
-                    modifyContent: true,
                     prefixToRemove: removeMatchedPrefix(match),
                     metadata: CONFIG.METADATA
                 };
@@ -173,7 +172,6 @@
 
                 return {
                     username: match[1],
-                    modifyContent: true,
                     prefixToRemove: removeMatchedPrefix(match),
                     metadata: CONFIG.METADATA
                 };
@@ -229,7 +227,6 @@
 
                 return {
                     username: extractedUsername,
-                    modifyContent: true,
                     prefixToRemove: removeMatchedPrefix(match),
                     metadata
                 };
@@ -247,7 +244,6 @@
                     // Remove '-web' suffix for HUNO shoutbox users
                     return {
                         username: msg.from.slice(0, -4),
-                        modifyContent: false, // Username-only transformation
                         metadata: CONFIG.METADATA
                     }
                 }
@@ -265,7 +261,6 @@
 
                 return {
                     username: match[1],
-                    modifyContent: true,
                     prefixToRemove: removeMatchedPrefix(match),
                     metadata: CONFIG.METADATA
                 };
@@ -410,7 +405,7 @@
     }
 
     // Run through format handlers to find a match
-    // Returns { username, modifyContent, prefixToRemove, metadata } or null if no match
+    // Returns { username, prefixToRemove, metadata } or null if no match
     function runFormatHandlers(msg) {
         for (const formatHandler of HANDLERS) {
             if (!formatHandler.enabled) continue; // Skip disabled handlers
@@ -552,21 +547,22 @@
         if (!parsed) return;
 
         // Destructure parsed result
-        const { username, modifyContent, prefixToRemove, metadata } = parsed;
+        const { username, prefixToRemove, metadata } = parsed;
 
         // Check if username changed - if so, we need to handle color matching
         const usernameChanged = (username !== initialUsername);
 
-        // Add and modify message metadata
-        fromSpan.setAttribute('data-name', username);
-        fromSpan.setAttribute('data-bridged', metadata); // For CSS targeting
-        fromSpan.setAttribute('data-bridged-channel', channel); // For CSS targeting
-
-        // Add user to autocomplete
-        if (CONFIG.USE_AUTOCOMPLETE) { addUserToAutocomplete(username); }
-
-        // Handle color matching if username changed
+        // Handle username related changes if the username has been changed
         if (usernameChanged) {
+            // Add and modify message metadata
+            fromSpan.setAttribute('data-name', username);
+            fromSpan.setAttribute('data-bridged', metadata); // For CSS targeting
+            fromSpan.setAttribute('data-bridged-channel', channel); // For CSS targeting
+
+            // Add user to autocomplete
+            if (CONFIG.USE_AUTOCOMPLETE) { addUserToAutocomplete(username); }
+
+            // Handle color matching if username changed
             const colorClass = getUserColor(username);
             if (colorClass) {
                 applyColorToMessage(fromSpan, colorClass);
@@ -579,24 +575,23 @@
                     }
                 }, 200);
             }
-        }
 
-        // Update the username
-        if (CONFIG.USE_DECORATORS) {
-            fromSpan.textContent = CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R;
-        } else {
-            fromSpan.textContent = username;
-        }
+            // Update the username
+            if (CONFIG.USE_DECORATORS) {
+                fromSpan.textContent = CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R;
+            } else {
+                fromSpan.textContent = username;
+            }
 
-        // Update the message content using surgical approach or skip content modification
-        if (modifyContent && prefixToRemove) {
-            // Use surgical DOM modification to preserve event listeners and preview functionality
-            const success = removePrefixSurgically(contentSpan, prefixToRemove);
-            if (!success) {
-                console.warn('Surgical prefix removal failed for message from:', username);
+            // Update the message content using surgical approach or skip content modification
+            if (prefixToRemove) {
+                // Use surgical DOM modification to preserve event listeners and preview functionality
+                const success = removePrefixSurgically(contentSpan, prefixToRemove);
+                if (!success) {
+                    console.warn('Surgical prefix removal failed for message from:', username);
+                }
             }
         }
-        // If modifyContent is false, we only transform the username and leave content untouched
     }
 
     // Create and start observing DOM changes
