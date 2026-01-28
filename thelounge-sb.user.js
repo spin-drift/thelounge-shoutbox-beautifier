@@ -84,6 +84,7 @@
             /.+?-web/,          // HUNO (Shoutbox)
             '&Sauron',          // ANT
             '+bridgebot',       // OE+
+            'Luminarr',         // LUME
         ],
         USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
         USE_DECORATORS: true,   // Enable username decorators

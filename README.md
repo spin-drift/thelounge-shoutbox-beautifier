@@ -1,6 +1,6 @@
 # Ultimate Shoutbox Beautifier for TheLounge
 
-**Known compatibility:** ATH, ULCX, BHD, RFX, HHD, DP, LST, HUNO, ANT, OE+
+**Known compatibility:** ATH, ULCX, BHD, RFX, HHD, DP, LST, HUNO, ANT, OE+, LUME
 
 ## Screenshots
 
