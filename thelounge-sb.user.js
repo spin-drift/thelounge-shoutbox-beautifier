@@ -1,209 +1,396 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      3.0-dev0.2
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
+//
+// @connect      aither.cc
+//
 // @icon         https://thelounge.chat/favicon.ico
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @run-at       document-start
 // ==/UserScript==
-
-// This is a reworked version of the original script that adds:
-// - Handler architecture: Makes it easier to add new formats
-// - Custom decorators: Set a prefix/suffix for bridged usernames
-// - DOM metadata: Completely customize appearance with TheLounge theme CSS
-// - Regex matcher support: Pair with custom handlers to do almost anything
-// - Preview support: Surgical DOM modification preserves link previews and event listeners
-// - More handlers: BHD, extensive HUNO support
-// - Nick coloring: Bridged usernames get proper TheLounge colors instead of inheriting bot colors
-
-// CREDITS:
-// fulcrum: Original script (https://aither.cc/forums/topics/3874)
-// marks: Autocomplete enablement (https://aither.cc/forums/topics/3874/posts/32274)
-
-// INSTALLATION:
-// - Install Tampermonkey or a compatible userscript manager
-// - Create a new script and paste this in
-// - Set @match to the IP or domain you access TheLounge on
-
-// TROUBLESHOOTING:
-// - Make sure @match is set to your TheLounge domain, in the same format as:
-//     *://your-thelounge-domain.com/*
-// - Try disabling autocomplete (USE_AUTOCOMPLETE: false)
-// - Check the browser console for errors
-// - When in doubt, simply refresh the page
-
-// CHANGELOG:
-// - 1.0 - (spindrift) Initial release
-// - 2.0 - (spindrift) Fix link previews, change return structure to add `modifyContent` and `prefixToRemove`
-// - 2.1 - (spindrift) Sanitize zero-width characters (fixes HUNO Discord handler)
-// - 2.2 - (sparrow) Add option to hide join/quit messages, add TheLounge icon to Tampermonkey
-// - 2.3 - (spindrift) Add color matching - bridged usernames get proper TheLounge colors
-// - 2.4 - (AnabolicsAnonymous) Update ULCX matchers
-// - 2.5 - (spindrift) Add ANT support (thanks JCDenton for initial work)
-// - 2.6 - (FortKnox1337) Add RFX support, enable DP and HHD support, fix ANT/BHD support (thanks!!)
-// - 2.7 - (cmd430) Enable OE+ support, fix config indents, fixes script breaking after viewing a non-chat page
-
-// CSS STYLING:
-// Custom CSS can be added easily in TheLounge > Settings > Appearance.
-// You can use the following CSS selectors to target bridged messages in your themes:
-// - span[data-bridged] selects the usernames of all bridged messages
-// - span[data-bridged-channel] selects bridged messages from specific channels
-// - attr(data-bridged) retrieves the embedded metadata prefix (e.g., 'SB')
-//
-//   Examples:
-//   - Italicize all bridged usernames:
-//     span[data-bridged] { font-style: italic; }
-//
-//   - Show HUNO Discord ranks in tiny text before username, only in #huno* channels:
-//     span[data-bridged-channel~="#huno"]:before {
-//       content: attr(data-bridged);
-//       font-size: 8px;
-//       margin-right: 5px;
-//     }
 
 (function () {
     'use strict';
 
-    // --- YOU CAN START EDITING STUFF HERE ---
+    // =====================================================================
+    //  CAPABILITY DETECTION
+    // =====================================================================
 
-    const CONFIG = {
-        // Add chatbot nicks here, including operator (~, @, etc.)
-        // Can also add regex patterns for more complex matches
-        // NOTE: A hit from any matcher will run all handlers
-        MATCHERS: [
-            'Chatbot',          // ATH
-            '%ULCX',            // ULCX
-            '@Willie',          // BHD
-            '@WALL-E',          // RFX
-            'BBot', '@BBot',    // HHD
-            '&darkpeers',       // DP
-            'Bot',              // LST
-            '+Mellos',          // HUNO (Discord)
-            /.+?-web/,          // HUNO (Shoutbox)
-            '&Sauron',          // ANT
-            '+bridgebot',       // OE+
-        ],
-        USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
-        USE_DECORATORS: true,   // Enable username decorators
-        REMOVE_JOIN_QUIT: false,// Removes join/quit messages
-        DECORATOR_L: '(',       // Will be prepended to username
-        DECORATOR_R: ')',       // Will be appended to username
-        METADATA: 'SB',         // Default metadata to be inserted into HTML
+    const HAS_GM_XHR = typeof GM_xmlhttpRequest !== 'undefined';
+
+    // =====================================================================
+    //  STORAGE (localStorage with usb_ prefix)
+    // =====================================================================
+
+    const STORE_PREFIX = 'usb_';
+
+    function storeGet(key) {
+        try {
+            const raw = localStorage.getItem(STORE_PREFIX + key);
+            return raw ? JSON.parse(raw) : null;
+        } catch { return null; }
     }
 
-    // FORMAT HANDLERS:
-    // Easily add support for new formats, just copy an existing handler and modify it
-    //
-    // Tips for writing regex matches:
-    // - Make sure you check msg.text, not msg.html
-    // - Always include the entire (non-prefix) message in a capture group: (.*)$
-    // - regex101.com is a great resource for interactive debugging
-    //
-    // If you're rolling your own custom handler, please note...
-    //
-    // Handlers should be formatted as objects with the structure:
-    // - enabled: true/false to enable/disable
-    // - handler: function that takes a message object and returns:
-    //   { username, modifyContent, prefixToRemove, metadata } or null if no match
-    //   - username: what to show the person's nick as
-    //   - modifyContent: true to remove prefix from message content, false for username-only changes
-    //   - prefixToRemove: text to remove from message (only needed if modifyContent is true)
-    //   - metadata: string to insert into HTML for CSS targeting (or default to CONFIG.METADATA)
-    //
-    // Handler functions should make use of the `msg` object, which contains:
-    // - text: textContent of message
-    // - html: innerHTML of message
-    // - from: sender of message (usually the chatbot)
-    // - chan: channel message was received in
-    //
-    // Helper functions available:
-    // - removeMatchedPrefix(match): automatically calculates prefix to remove from regex match
-    // - removeAllExceptMessage(text, messageText): removes everything before the message text
-    //
-    // Other handler notes:
-    // - Handlers should return null if no match, so the next handler can be tried
-    // - Handlers are processed in order, so more general handlers should be placed later
-    // - Handlers can be disabled by setting `enabled: false`
+    function storeSet(key, value) {
+        try { localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value)); }
+        catch { /* quota exceeded, silently fail */ }
+    }
 
-    // HELPER FUNCTIONS for handlers:
-    // Makes it easy to calculate what prefix to remove without complex string manipulation
+    function storeDelete(key) {
+        localStorage.removeItem(STORE_PREFIX + key);
+    }
 
-    // For most bridged message formats - automatically calculates prefix from regex match
+    function storeKeys(prefix) {
+        const full = STORE_PREFIX + (prefix || '');
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k.startsWith(full)) keys.push(k.slice(STORE_PREFIX.length));
+        }
+        return keys;
+    }
+
+    // =====================================================================
+    //  SETTINGS
+    // =====================================================================
+
+    const DEFAULT_SETTINGS = {
+        USE_AUTOCOMPLETE: true,
+        USE_DECORATORS: true,
+        USE_AVATARS: false,
+        REMOVE_JOIN_QUIT: false,
+        DECORATOR_L: '(',
+        DECORATOR_R: ')',
+        METADATA: 'SB',
+    };
+
+    function loadSettings() {
+        const saved = storeGet('settings');
+        return { ...DEFAULT_SETTINGS, ...(saved || {}) };
+    }
+
+    function saveSettings(settings) {
+        storeSet('settings', settings);
+    }
+
+    let CONFIG = loadSettings();
+
+    // =====================================================================
+    //  SITE MAPPINGS
+    // =====================================================================
+
+    function loadSiteMappings() {
+        return storeGet('site_mappings') || {};
+    }
+
+    function saveSiteMappings(mappings) {
+        storeSet('site_mappings', mappings);
+    }
+
+    function resolveSiteForContext(network, channel) {
+        if (!network) return null;
+        const mappings = loadSiteMappings();
+        if (channel) {
+            const channelKey = `${network}/${channel}`;
+            if (channelKey in mappings) {
+                // '__none__' means explicitly no site, even if network has one
+                return mappings[channelKey] === '__none__' ? null : mappings[channelKey] || null;
+            }
+        }
+        return mappings[network] || null;
+    }
+
+    // Tracked sites: user-maintained list of tracker hostnames for dropdown menus.
+    // Unlike the old cookie bridge, these are just labels — authentication is
+    // handled automatically by GM_xmlhttpRequest forwarding browser cookies.
+    function loadTrackerSites() {
+        return storeGet('tracker_sites') || [];
+    }
+
+    function saveTrackerSites(sites) {
+        storeSet('tracker_sites', sites);
+    }
+
+    // =====================================================================
+    //  NETWORK/CHANNEL RESOLUTION FROM SIDEBAR
+    // =====================================================================
+
+    function getActiveNetworkAndChannel() {
+        const active = document.querySelector('.channel-list-item.active');
+        if (!active) return null;
+        const network = active.closest('.network');
+        if (!network) return null;
+        const lobby = network.querySelector('.channel-list-item[data-type="lobby"]');
+        return {
+            network: lobby?.getAttribute('data-name') || null,
+            channel: active.getAttribute('data-name') || null,
+        };
+    }
+
+    function scrapeNetworkTree() {
+        const tree = [];
+        for (const networkEl of document.querySelectorAll('.network')) {
+            const lobby = networkEl.querySelector('.channel-list-item[data-type="lobby"]');
+            const name = lobby?.getAttribute('data-name');
+            if (!name) continue;
+            const channels = [];
+            for (const chanEl of networkEl.querySelectorAll('.channel-list-item[data-type="channel"]')) {
+                const chanName = chanEl.getAttribute('data-name');
+                if (chanName) channels.push(chanName);
+            }
+            tree.push({ name, channels });
+        }
+        return tree;
+    }
+
+    // =====================================================================
+    //  THELOUNGE DETECTION
+    // =====================================================================
+
+    function isTheLounge() {
+        return document.querySelector('meta[name="application-name"][content="The Lounge"]') !== null;
+    }
+
+    function waitForTheLounge() {
+        return new Promise((resolve) => {
+            if (isTheLounge()) return resolve(true);
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => resolve(isTheLounge()));
+            } else {
+                resolve(false);
+            }
+        });
+    }
+
+    // =====================================================================
+    //  AVATAR CACHE & FETCHING
+    // =====================================================================
+
+    const AVATAR_PREFIX = 'av_';
+    const AVATAR_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
+    const AVATAR_MAX_ENTRIES = 5000;
+    const AVATAR_THUMB_SIZE = 48;
+
+    // Default avatar (UNIT3D profile.png) used when a user has no avatar set
+    const DEFAULT_AVATAR = 'data:image/png;base64,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';
+
+    const avatarUrlCache = new Map();
+    const avatarInflight = new Map();
+
+    function thumbnailize(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = AVATAR_THUMB_SIZE;
+                    canvas.height = AVATAR_THUMB_SIZE;
+                    const ctx = canvas.getContext('2d');
+                    const srcSize = Math.min(img.width, img.height);
+                    const sx = (img.width - srcSize) / 2;
+                    const sy = (img.height - srcSize) / 2;
+                    ctx.drawImage(img, sx, sy, srcSize, srcSize, 0, 0, AVATAR_THUMB_SIZE, AVATAR_THUMB_SIZE);
+                    let dataUrl = canvas.toDataURL('image/webp', 0.75);
+                    if (!dataUrl.startsWith('data:image/webp')) {
+                        dataUrl = canvas.toDataURL('image/jpeg', 0.75);
+                    }
+                    resolve(dataUrl);
+                };
+                img.onerror = () => reject(new Error('Thumbnail failed'));
+                img.src = reader.result;
+            };
+            reader.onerror = () => reject(new Error('FileReader failed'));
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    function readAvatarCache(cacheKey) {
+        const entry = storeGet(AVATAR_PREFIX + cacheKey);
+        if (!entry || !entry.fetchedAt) return null;
+        if ((Date.now() - entry.fetchedAt) > AVATAR_TTL) {
+            storeDelete(AVATAR_PREFIX + cacheKey);
+            return null;
+        }
+        return entry;
+    }
+
+    function writeAvatarCache(cacheKey, dataUrl) {
+        storeSet(AVATAR_PREFIX + cacheKey, { data: dataUrl, fetchedAt: Date.now() });
+        evictAvatarCacheIfNeeded();
+    }
+
+    function writeAvatarCacheMiss(cacheKey) {
+        storeSet(AVATAR_PREFIX + cacheKey, { data: null, fetchedAt: Date.now() });
+    }
+
+    function evictAvatarCacheIfNeeded() {
+        const allKeys = storeKeys(AVATAR_PREFIX);
+        if (allKeys.length <= AVATAR_MAX_ENTRIES) return;
+        const entries = allKeys.map(key => {
+            const entry = storeGet(key);
+            return { key, fetchedAt: entry?.fetchedAt || 0 };
+        });
+        entries.sort((a, b) => a.fetchedAt - b.fetchedAt);
+        const toDelete = entries.length - AVATAR_MAX_ENTRIES;
+        for (let i = 0; i < toDelete; i++) storeDelete(entries[i].key);
+    }
+
+    function invalidateAvatar(site, username) {
+        const cacheKey = `${site}/${username}`;
+        storeDelete(AVATAR_PREFIX + cacheKey);
+        avatarUrlCache.delete(cacheKey);
+        avatarInflight.delete(cacheKey);
+    }
+
+    function clearAvatarCache() {
+        for (const key of storeKeys(AVATAR_PREFIX)) storeDelete(key);
+        avatarUrlCache.clear();
+        avatarInflight.clear();
+    }
+
+    function getAvatar(site, username) {
+        if (!HAS_GM_XHR) return Promise.resolve(DEFAULT_AVATAR);
+
+        const cacheKey = `${site}/${username}`;
+
+        if (avatarUrlCache.has(cacheKey)) return Promise.resolve(avatarUrlCache.get(cacheKey));
+
+        const cached = readAvatarCache(cacheKey);
+        if (cached) {
+            const url = cached.data || DEFAULT_AVATAR;
+            avatarUrlCache.set(cacheKey, url);
+            return Promise.resolve(url);
+        }
+
+        if (avatarInflight.has(cacheKey)) return avatarInflight.get(cacheKey);
+
+        const fetchPromise = new Promise((resolve) => {
+            const url = `https://${site}/authenticated-images/user-avatars/${username}`;
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                responseType: 'blob',
+                onload(response) {
+                    avatarInflight.delete(cacheKey);
+                    if (response.status >= 200 && response.status < 300 && response.response.size > 0) {
+                        thumbnailize(response.response).then(dataUrl => {
+                            writeAvatarCache(cacheKey, dataUrl);
+                            avatarUrlCache.set(cacheKey, dataUrl);
+                            resolve(dataUrl);
+                        }).catch(() => {
+                            writeAvatarCacheMiss(cacheKey);
+                            avatarUrlCache.set(cacheKey, DEFAULT_AVATAR);
+                            resolve(DEFAULT_AVATAR);
+                        });
+                    } else {
+                        writeAvatarCacheMiss(cacheKey);
+                        avatarUrlCache.set(cacheKey, DEFAULT_AVATAR);
+                        resolve(DEFAULT_AVATAR);
+                    }
+                },
+                onerror() {
+                    avatarInflight.delete(cacheKey);
+                    writeAvatarCacheMiss(cacheKey);
+                    avatarUrlCache.set(cacheKey, DEFAULT_AVATAR);
+                    resolve(DEFAULT_AVATAR);
+                },
+            });
+        });
+
+        avatarInflight.set(cacheKey, fetchPromise);
+        return fetchPromise;
+    }
+
+    function injectAvatar(fromDiv, avatarUrl) {
+        if (!avatarUrl || fromDiv.querySelector('.usb-avatar')) return;
+        const wrapper = document.createElement('span');
+        wrapper.className = 'usb-avatar';
+        const img = document.createElement('img');
+        img.src = avatarUrl;
+        img.alt = '';
+        img.loading = 'lazy';
+        wrapper.appendChild(img);
+        fromDiv.insertBefore(wrapper, fromDiv.firstChild);
+    }
+
+    // =====================================================================
+    //  MATCHERS
+    // =====================================================================
+
+    const MATCHERS = [
+        'Chatbot',          // ATH
+        '%ULCX',            // ULCX
+        '@Willie',          // BHD
+        '@WALL-E',          // RFX
+        'BBot', '@BBot',    // HHD
+        '&darkpeers',       // DP
+        'Bot',              // LST
+        '+Mellos',          // HUNO (Discord)
+        /.+?-web/,          // HUNO (Shoutbox)
+        '&Sauron',          // ANT
+        '+bridgebot',       // OE+
+    ];
+
+    function matcherMatches(username) {
+        return MATCHERS.some(pattern =>
+            typeof pattern === 'string'
+                ? pattern === username
+                : pattern instanceof RegExp && pattern.test(username)
+        );
+    }
+
+    // =====================================================================
+    //  FORMAT HANDLERS
+    // =====================================================================
+
+    // See earlier versions for full documentation on handler structure.
+    // Each handler returns { username, modifyContent, prefixToRemove, metadata } or null.
+
     function removeMatchedPrefix(match) {
         const fullMatch = match[0];
-        const messageText = match[match.length - 1]; // Last capture group = message
-        const prefixEnd = fullMatch.lastIndexOf(messageText);
-        return fullMatch.substring(0, prefixEnd);
+        const messageText = match[match.length - 1];
+        return fullMatch.substring(0, fullMatch.lastIndexOf(messageText));
     }
 
-    // For when you want to remove everything except the message text
     function removeAllExceptMessage(text, messageText) {
-        const messageStart = text.lastIndexOf(messageText);
-        return text.substring(0, messageStart);
+        return text.substring(0, text.lastIndexOf(messageText));
     }
 
     const HANDLERS = [
         {
-            // Format: [SB] Nickname: Message or [ SB ] (Nickname): Message
-            // Used at: BHD, ANT
-
+            // [SB] Nickname: Message or [ SB ] (Nickname): Message — BHD, ANT
             enabled: true,
             handler: function (msg) {
                 const match = msg.text.match(/^\s?\[\s?SB\s?\]\s+\(?([^):]+)\)?:\s*(.*)$/);
                 if (!match) return null;
-
-                return {
-                    username: match[1],
-                    modifyContent: true,
-                    prefixToRemove: removeMatchedPrefix(match),
-                    metadata: CONFIG.METADATA
-                };
+                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
             }
         },
         {
-            // Format: [Chatbox] Nickname: Message
-            // Used at: RFX
-
+            // [Chatbox] Nickname: Message — RFX
             enabled: true,
             handler: function (msg) {
                 const match = msg.text.match(/^\[Chatbox\]\s+([^:]+):\s*(.*)$/);
                 if (!match) return null;
-
-                return {
-                    username: match[1],
-                    modifyContent: true,
-                    prefixToRemove: removeMatchedPrefix(match),
-                    metadata: CONFIG.METADATA
-                };
+                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
             }
         },
         {
-            // Format: »Username« Message or »Username (Rank)« Message
-            // Used at: HUNO (Discord bridge)
-
+            // »Username« Message or »Username (Rank)« Message — HUNO (Discord)
             enabled: true,
             handler: function (msg) {
-                const HANDLER_CONFIG = {
-                    REMOVE_RANK: true,  // Splits out rank from username into metadata
-                    ABBREVIATE_RANK: true,  // Abbreviates rank (REMOVE_RANK must be set)
-                    FORCE_ABBREVIATE: false  // Always abbreviates rank, even if it's only one word
-                };
-
-                // Clean zero-width characters from the text before processing
+                const HANDLER_CONFIG = { REMOVE_RANK: true, ABBREVIATE_RANK: true, FORCE_ABBREVIATE: false };
                 const cleanText = msg.text.replace(/[\u200B-\u200D\uFEFF]/g, '');
-
-                // Two-step approach: try « format first, then space format
                 let match = cleanText.match(/^»([^«]+)«\s*(.*)$/);
-                if (!match) {
-                    // If no « found, try space-separated format (non-greedy to stop at first space)
-                    match = cleanText.match(/^»(\S+(?:\s+\([^)]+\))?)\s+(.*)$/);
-                }
+                if (!match) match = cleanText.match(/^»(\S+(?:\s+\([^)]+\))?)\s+(.*)$/);
                 if (!match) return null;
 
-                // Abbreviates rank if needed
-                // If ABBREVIATE_RANK is true, it will abbreviate ranks like "White Walkers" to "WW"
                 function abbreviateRank(rank) {
                     const caps = rank.match(/[A-Z]/g);
                     if (!caps) return '';
@@ -211,395 +398,721 @@
                     return caps.join('');
                 }
 
-                let rawUsername = match[1]; // The full username with potential rank
-                let extractedUsername, metadata = '';
-
-                if (HANDLER_CONFIG.REMOVE_RANK && rawUsername.endsWith(')')) { // Check if it ends with a rank in parentheses
-                    const rankMatch = rawUsername.match(/^(.*)\s+\(([^)]+)\)$/); // Match "Username (Rank)"
+                let rawUsername = match[1], extractedUsername, metadata = '';
+                if (HANDLER_CONFIG.REMOVE_RANK && rawUsername.endsWith(')')) {
+                    const rankMatch = rawUsername.match(/^(.*)\s+\(([^)]+)\)$/);
                     if (rankMatch) {
-                        extractedUsername = rankMatch[1].trim(); // Username without rank
-                        const rank = rankMatch[2]; // Extracted rank
-                        metadata = HANDLER_CONFIG.ABBREVIATE_RANK ? abbreviateRank(rank) : rank; // Abbreviated rank
-                    } else {
-                        extractedUsername = rawUsername.trim();
-                    }
-                } else {
-                    extractedUsername = rawUsername.trim();
-                }
+                        extractedUsername = rankMatch[1].trim();
+                        metadata = HANDLER_CONFIG.ABBREVIATE_RANK ? abbreviateRank(rankMatch[2]) : rankMatch[2];
+                    } else { extractedUsername = rawUsername.trim(); }
+                } else { extractedUsername = rawUsername.trim(); }
 
-                return {
-                    username: extractedUsername,
-                    modifyContent: true,
-                    prefixToRemove: removeMatchedPrefix(match),
-                    metadata
-                };
+                return { username: extractedUsername, modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata };
             }
         },
         {
-            // Format: <Username-web> Message
-            // Used at: HUNO (Shoutbox bridge)
-
+            // <Username-web> Message — HUNO (Shoutbox)
             enabled: true,
             handler: function (msg) {
-                // Only apply this handler for HUNO channels
                 if (!msg.chan.startsWith('#huno')) return null;
                 if (msg.from.endsWith('-web')) {
-                    // Remove '-web' suffix for HUNO shoutbox users
-                    return {
-                        username: msg.from.slice(0, -4),
-                        modifyContent: false, // Username-only transformation
-                        metadata: CONFIG.METADATA
-                    }
+                    return { username: msg.from.slice(0, -4), modifyContent: false, metadata: CONFIG.METADATA };
                 }
                 return null;
             }
         },
         {
-            // Format: [Nickname] Message or [Nickname]: Message
-            // Used at: ATH, DP, ULCX, HHD, LST
-
+            // [Nickname] Message or [Nickname]: Message — ATH, DP, ULCX, HHD, LST
             enabled: true,
             handler: function (msg) {
                 const match = msg.text.match(/^\[([^\]]+)\](?::\s*|\s+)(.*)$/);
                 if (!match) return null;
-
-                return {
-                    username: match[1],
-                    modifyContent: true,
-                    prefixToRemove: removeMatchedPrefix(match),
-                    metadata: CONFIG.METADATA
-                };
+                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
             }
         }
     ];
 
-    // --- STOP EDITING STUFF HERE ---
+    function runFormatHandlers(msg) {
+        for (const h of HANDLERS) {
+            if (!h.enabled) continue;
+            const result = h.handler(msg);
+            if (result) return result;
+        }
+        return null;
+    }
 
-    // SURGICAL DOM MODIFICATION FUNCTIONS:
-    // These functions modify message content while preserving event listeners and preview functionality
+    // =====================================================================
+    //  SURGICAL DOM MODIFICATION
+    // =====================================================================
 
     function findPrefixTextNodes(contentSpan, prefixText) {
-        // Find all text nodes that contain the prefix we want to remove
-        const walker = document.createTreeWalker(
-            contentSpan,
-            NodeFilter.SHOW_TEXT,
-            null,
-            false
-        );
-
+        const walker = document.createTreeWalker(contentSpan, NodeFilter.SHOW_TEXT, null, false);
         let accumulatedText = '';
         const nodesToProcess = [];
         let textNode;
-
-        // Walk through text nodes until we've found all the prefix text
         while (textNode = walker.nextNode()) {
-            const nodeText = textNode.textContent;
-            nodesToProcess.push({
-                node: textNode,
-                text: nodeText,
-                accumulatedLength: accumulatedText.length
-            });
-
-            accumulatedText += nodeText;
-
-            // Stop when we have enough text to contain the full prefix
-            if (accumulatedText.length >= prefixText.length) {
-                break;
-            }
+            nodesToProcess.push({ node: textNode, text: textNode.textContent, accumulatedLength: accumulatedText.length });
+            accumulatedText += textNode.textContent;
+            if (accumulatedText.length >= prefixText.length) break;
         }
-
         return { nodesToProcess, accumulatedText };
     }
 
     function removePrefixSurgically(contentSpan, prefixText) {
-        // Surgically remove prefix text while preserving all DOM structure and event listeners
         const { nodesToProcess, accumulatedText } = findPrefixTextNodes(contentSpan, prefixText);
+        const cleaned = accumulatedText.replace(/[\u200B-\u200D\uFEFF]/g, '');
+        if (!cleaned.startsWith(prefixText)) return false;
 
-        // Clean zero-width characters from accumulated text for comparison
-        // This ensures we match the same cleaned text that handlers worked with
-        const cleanedAccumulatedText = accumulatedText.replace(/[\u200B-\u200D\uFEFF]/g, '');
-
-        // Verify we found the expected prefix (after cleaning)
-        if (!cleanedAccumulatedText.startsWith(prefixText)) {
-            console.warn('Surgical removal failed - could not find expected prefix:', prefixText);
-            console.warn('Looking for:', JSON.stringify(prefixText));
-            console.warn('Found in DOM:', JSON.stringify(cleanedAccumulatedText.substring(0, prefixText.length + 10)));
-            return false;
-        }
-
-        // We need to account for zero-width characters when calculating removal length
-        // Calculate how much to remove from the original (uncleaned) text
-        let remainingToRemove = prefixText.length;
         let cleanedCharsProcessed = 0;
-
-        // Process each text node to remove the prefix
         for (const { node, text } of nodesToProcess) {
             if (cleanedCharsProcessed >= prefixText.length) break;
-
-            // Clean this node's text to see how much of the prefix it contains
             const cleanedNodeText = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
             const cleanedNodeLength = cleanedNodeText.length;
-
-            // Calculate how much of the cleaned prefix this node represents
             const cleanedCharsInThisNode = Math.min(cleanedNodeLength, prefixText.length - cleanedCharsProcessed);
             cleanedCharsProcessed += cleanedCharsInThisNode;
 
             if (cleanedCharsInThisNode === cleanedNodeLength) {
-                // This entire node's cleaned content is part of the prefix - remove it all
                 node.textContent = '';
             } else {
-                // This node contains the end of the prefix
-                // We need to find where the prefix ends in the original (uncleaned) text
-                let originalCharsToRemove = 0;
-                let cleanedCount = 0;
-
+                let originalCharsToRemove = 0, cleanedCount = 0;
                 for (let i = 0; i < text.length && cleanedCount < cleanedCharsInThisNode; i++) {
-                    const char = text[i];
                     originalCharsToRemove++;
-
-                    // Count non-zero-width characters
-                    if (!/[\u200B-\u200D\uFEFF]/.test(char)) {
-                        cleanedCount++;
-                    }
+                    if (!/[\u200B-\u200D\uFEFF]/.test(text[i])) cleanedCount++;
                 }
-
                 node.textContent = text.substring(originalCharsToRemove);
-                break; // We're done
+                break;
             }
         }
-
-        // Clean up empty text nodes and their containers
         cleanupEmptyNodes(contentSpan);
-
         return true;
     }
 
     function cleanupEmptyNodes(contentSpan) {
-        // Remove empty text nodes
-        const walker = document.createTreeWalker(
-            contentSpan,
-            NodeFilter.SHOW_TEXT,
-            null,
-            false
-        );
-
-        const emptyTextNodes = [];
-        let textNode;
-
-        while (textNode = walker.nextNode()) {
-            if (textNode.textContent === '') {
-                emptyTextNodes.push(textNode);
-            }
-        }
-
-        emptyTextNodes.forEach(node => node.remove());
-
-        // Remove empty span elements that only contained removed text
-        // Be careful not to remove spans that might be important for styling or functionality
-        const emptySpans = contentSpan.querySelectorAll('span:empty');
-        emptySpans.forEach(span => {
-            // Only remove spans that don't have important classes
-            const classes = span.className;
-            const importantClasses = ['preview-size', 'toggle-button', 'user', 'irc-fg', 'irc-bg'];
-            const hasImportantClass = importantClasses.some(cls => classes.includes(cls));
-
-            if (!hasImportantClass) {
-                span.remove();
-            }
+        const walker = document.createTreeWalker(contentSpan, NodeFilter.SHOW_TEXT, null, false);
+        const empty = [];
+        let t;
+        while (t = walker.nextNode()) { if (t.textContent === '') empty.push(t); }
+        empty.forEach(n => n.remove());
+        const keep = ['preview-size', 'toggle-button', 'user', 'irc-fg', 'irc-bg'];
+        contentSpan.querySelectorAll('span:empty').forEach(span => {
+            if (!keep.some(cls => span.className.includes(cls))) span.remove();
         });
     }
 
-    // Run through format handlers to find a match
-    // Returns { username, modifyContent, prefixToRemove, metadata } or null if no match
-    function runFormatHandlers(msg) {
-        for (const formatHandler of HANDLERS) {
-            if (!formatHandler.enabled) continue; // Skip disabled handlers
-            const result = formatHandler.handler(msg);
-            if (result) {
-                return result;
-            }
-        }
-        return null;
-    }
+    // =====================================================================
+    //  COLOR MATCHING & AUTOCOMPLETE
+    // =====================================================================
 
-    // Insert username into Vue store for autocomplete
-    // By marks: https://aither.cc/forums/topics/3874/posts/32274
     function addUserToAutocomplete(username) {
         try {
             const state = Array.from(document.querySelectorAll('*'))
-                .find(e => e.__vue_app__)?.__vue_app__?.config?.globalProperties?.$store?.state;
-
+                .find(e => e.__vue_app__)
+                ?.__vue_app__?.config?.globalProperties?.$store?.state;
             if (!state?.activeChannel?.channel?.users) return;
-
             const users = state.activeChannel.channel.users;
             if (!users.find(u => u.nick === username)) {
                 users.push({ nick: username, modes: [], lastMessage: Date.now() });
             }
-        } catch (error) {
-            console.warn('Could not add user ' + username + ' for autocomplete:', error);
-        }
+        } catch { /* ignore */ }
     }
 
-    // COLOR MATCHING FUNCTIONS:
-    // Handle color assignment for bridged usernames
-
     function findUserInUserlist(username) {
-        // Find user in the DOM userlist, accounting for IRC mode symbols (@, +, !, etc.)
-        const userlistUsers = document.querySelectorAll('.userlist .user[data-name]');
-
-        for (const userElement of userlistUsers) {
-            const dataName = userElement.getAttribute('data-name');
-            if (dataName === username) {
-                return userElement;
-            }
+        for (const el of document.querySelectorAll('.userlist .user[data-name]')) {
+            if (el.getAttribute('data-name') === username) return el;
         }
         return null;
     }
 
+    function extractColorClass(el) {
+        return el.className.split(' ').find(cls => cls.startsWith('color-')) || null;
+    }
+
     function getUserColor(username) {
-        // Get the color class for a username, either from existing userlist or by adding them first
         let userElement = findUserInUserlist(username);
-
         if (!userElement) {
-            // User not found in userlist, add them to autocomplete which should also add to DOM
             addUserToAutocomplete(username);
-
-            // Try again after adding - give it a moment to update the DOM
             setTimeout(() => {
                 userElement = findUserInUserlist(username);
-                if (userElement) {
-                    return extractColorClass(userElement);
-                }
+                if (userElement) return extractColorClass(userElement);
             }, 50);
-
-            // If still not found, return null and we'll try again later
             return null;
         }
-
         return extractColorClass(userElement);
     }
 
-    function extractColorClass(userElement) {
-        // Extract the color-X class from a user element
-        const classes = userElement.className.split(' ');
-        const colorClass = classes.find(cls => cls.startsWith('color-'));
-        return colorClass || null;
-    }
-
     function applyColorToMessage(fromSpan, colorClass) {
-        // Apply the color class to the message's fromSpan
-        if (colorClass) {
-            // Remove any existing color classes
-            const classes = fromSpan.className.split(' ');
-            const filteredClasses = classes.filter(cls => !cls.startsWith('color-'));
-            // Add the new color class
-            filteredClasses.push(colorClass);
-            fromSpan.className = filteredClasses.join(' ');
+        if (!colorClass) return;
+        const classes = fromSpan.className.split(' ').filter(cls => !cls.startsWith('color-'));
+        classes.push(colorClass);
+        fromSpan.className = classes.join(' ');
+    }
+
+    // =====================================================================
+    //  IRC PREFIX STRIPPING
+    // =====================================================================
+
+    const IRC_MODE_PREFIXES = /^[~&@%+!]+/;
+
+    function stripIrcPrefix(username) {
+        return username.replace(IRC_MODE_PREFIXES, '');
+    }
+
+    // =====================================================================
+    //  UTILITY
+    // =====================================================================
+
+    function escapeHtml(str) {
+        const el = document.createElement('span');
+        el.textContent = str;
+        return el.innerHTML;
+    }
+
+    function timeSince(timestamp) {
+        const s = Math.floor((Date.now() - timestamp) / 1000);
+        if (s < 60) return 'just now';
+        const m = Math.floor(s / 60);
+        if (m < 60) return `${m}m ago`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `${h}h ago`;
+        return `${Math.floor(h / 24)}d ago`;
+    }
+
+    function showToast(message) {
+        const existing = document.querySelector('.usb-toast');
+        if (existing) existing.remove();
+        const toast = document.createElement('div');
+        toast.className = 'usb-toast';
+        toast.textContent = message;
+        toast.style.cssText = `
+            position: fixed; bottom: 20px; right: 20px; z-index: 10000;
+            background: var(--highlight-bg-color, #333); color: var(--body-color, #fff);
+            padding: 10px 16px; border-radius: 4px; font-size: 0.875em;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3); transition: opacity 0.3s ease;
+        `;
+        document.body.appendChild(toast);
+        setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 2000);
+    }
+
+    // =====================================================================
+    //  SETTINGS MODAL
+    // =====================================================================
+
+    function injectFooterButton() {
+        const footer = document.querySelector('#footer');
+        if (!footer || footer.querySelector('.usb-settings-btn')) return;
+
+        const wrapper = document.createElement('span');
+        wrapper.className = 'tooltipped tooltipped-n tooltipped-no-touch usb-settings-btn';
+        wrapper.setAttribute('aria-label', 'Shoutbox Beautifier');
+        wrapper.innerHTML = '<button class="icon settings" aria-label="Shoutbox Beautifier"></button>';
+        wrapper.querySelector('button').addEventListener('click', (e) => {
+            e.preventDefault();
+            toggleSettingsModal();
+        });
+
+        // Insert before the last child (Help)
+        const helpSpan = footer.lastElementChild;
+        footer.insertBefore(wrapper, helpSpan);
+    }
+
+    function toggleSettingsModal() {
+        const existing = document.querySelector('#usb-modal');
+        if (existing) { existing.remove(); return; }
+        renderSettingsModal();
+    }
+
+    function renderSettingsModal() {
+        const existing = document.querySelector('#usb-modal');
+        if (existing) existing.remove();
+
+        CONFIG = loadSettings();
+        const siteMappings = loadSiteMappings();
+        const trackerSites = loadTrackerSites();
+        const networkTree = scrapeNetworkTree();
+
+        // Overlay
+        const overlay = document.createElement('div');
+        overlay.id = 'usb-modal';
+        overlay.style.cssText = `
+            position: fixed; inset: 0; z-index: 9999;
+            background: rgba(0,0,0,0.5); display: flex;
+            align-items: center; justify-content: center;
+        `;
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+        // Modal
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            background: var(--window-bg-color, #1a1a2e); color: var(--body-color, #ccc);
+            border-radius: 8px; padding: 20px; width: 520px; max-width: 90vw;
+            max-height: 80vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            font-family: var(--body-font, sans-serif); font-size: 14px;
+        `;
+
+        // Header
+        const header = document.createElement('div');
+        header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;';
+        const title = document.createElement('h2');
+        title.textContent = 'Shoutbox Beautifier';
+        title.style.cssText = 'margin: 0; font-size: 18px;';
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'btn';
+        closeBtn.textContent = '\u00d7';
+        closeBtn.style.cssText = 'font-size: 20px; line-height: 1; padding: 2px 8px;';
+        closeBtn.addEventListener('click', () => overlay.remove());
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+        modal.appendChild(header);
+
+        // --- General section ---
+        modal.appendChild(makeH3('General'));
+
+        modal.appendChild(makeCheckbox('usb-autocomplete', 'Enable autocomplete for bridged usernames', CONFIG.USE_AUTOCOMPLETE, (v) => { CONFIG.USE_AUTOCOMPLETE = v; saveSettings(CONFIG); }));
+        modal.appendChild(makeCheckbox('usb-decorators', 'Enable username decorators', CONFIG.USE_DECORATORS, (v) => { CONFIG.USE_DECORATORS = v; saveSettings(CONFIG); }));
+        modal.appendChild(makeCheckbox('usb-avatars', 'Enable user avatars' + (HAS_GM_XHR ? '' : ' (requires userscript manager)'), CONFIG.USE_AVATARS && HAS_GM_XHR, (v) => { CONFIG.USE_AVATARS = v; saveSettings(CONFIG); }, !HAS_GM_XHR));
+        modal.appendChild(makeCheckbox('usb-join-quit', 'Remove join/quit messages', CONFIG.REMOVE_JOIN_QUIT, (v) => { CONFIG.REMOVE_JOIN_QUIT = v; saveSettings(CONFIG); }));
+
+        const decRow = document.createElement('div');
+        decRow.style.cssText = 'display: flex; gap: 12px; margin: 8px 0;';
+        decRow.appendChild(makeTextInput('Left decorator', CONFIG.DECORATOR_L, '(', (v) => { CONFIG.DECORATOR_L = v; saveSettings(CONFIG); }, '60px'));
+        decRow.appendChild(makeTextInput('Right decorator', CONFIG.DECORATOR_R, ')', (v) => { CONFIG.DECORATOR_R = v; saveSettings(CONFIG); }, '60px'));
+        decRow.appendChild(makeTextInput('Metadata', CONFIG.METADATA, 'SB', (v) => { CONFIG.METADATA = v; saveSettings(CONFIG); }, '60px'));
+        modal.appendChild(decRow);
+
+        // --- Site Mappings section ---
+        modal.appendChild(makeH3('Site Mappings'));
+
+        if (!HAS_GM_XHR) {
+            const note = document.createElement('p');
+            note.textContent = 'Avatar fetching requires a userscript manager (Tampermonkey, Violentmonkey, etc).';
+            note.style.cssText = 'opacity: 0.6; font-style: italic; margin: 4px 0;';
+            modal.appendChild(note);
         }
+
+        // Tracker sites management
+        const sitesLabel = document.createElement('div');
+        sitesLabel.style.cssText = 'margin-bottom: 8px;';
+        sitesLabel.innerHTML = '<b>Tracker sites</b> <span style="opacity:0.6">(add hostnames, e.g. aither.cc)</span>';
+        modal.appendChild(sitesLabel);
+
+        const sitesContainer = document.createElement('div');
+        sitesContainer.id = 'usb-sites-list';
+
+        function renderSitesList() {
+            sitesContainer.innerHTML = '';
+            const sites = loadTrackerSites();
+            for (const site of sites) {
+                const row = document.createElement('div');
+                row.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-bottom: 4px;';
+                const label = document.createElement('span');
+                label.textContent = site;
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'btn';
+                removeBtn.textContent = '\u00d7';
+                removeBtn.style.cssText = 'padding: 0 6px; font-size: 14px; line-height: 1.4;';
+                removeBtn.addEventListener('click', () => {
+                    const updated = loadTrackerSites().filter(s => s !== site);
+                    saveTrackerSites(updated);
+                    renderSettingsModal();
+                });
+                row.appendChild(label);
+                row.appendChild(removeBtn);
+                sitesContainer.appendChild(row);
+            }
+        }
+        renderSitesList();
+        modal.appendChild(sitesContainer);
+
+        const addRow = document.createElement('div');
+        addRow.style.cssText = 'display: flex; gap: 8px; margin-bottom: 16px;';
+        const addInput = document.createElement('input');
+        addInput.type = 'text';
+        addInput.className = 'input';
+        addInput.placeholder = 'aither.cc';
+        addInput.style.cssText = 'flex: 1;';
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn';
+        addBtn.textContent = 'Add';
+        addBtn.addEventListener('click', () => {
+            const val = addInput.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+            if (!val) return;
+            const sites = loadTrackerSites();
+            if (!sites.includes(val)) { sites.push(val); saveTrackerSites(sites); }
+            addInput.value = '';
+            renderSitesList();
+            // Re-render the whole modal so mapping dropdowns update
+            renderSettingsModal();
+        });
+        addRow.appendChild(addInput);
+        addRow.appendChild(addBtn);
+        modal.appendChild(addRow);
+
+        // Network → site mappings
+        if (networkTree.length > 0 && loadTrackerSites().length > 0) {
+            const mapLabel = document.createElement('div');
+            mapLabel.innerHTML = '<b>Network mappings</b>';
+            mapLabel.style.cssText = 'margin-bottom: 8px;';
+            modal.appendChild(mapLabel);
+
+            for (const net of networkTree) {
+                const netRow = document.createElement('div');
+                netRow.style.cssText = 'margin-bottom: 8px;';
+
+                const netHeader = document.createElement('div');
+                netHeader.style.cssText = 'display: flex; align-items: center; gap: 8px;';
+
+                const expandBtn = document.createElement('button');
+                expandBtn.type = 'button';
+                expandBtn.className = 'btn';
+                expandBtn.textContent = '+';
+                expandBtn.style.cssText = 'width: 24px; height: 24px; padding: 0; font-size: 12px; line-height: 1; flex-shrink: 0;';
+
+                const netLabel = document.createElement('b');
+                netLabel.textContent = net.name;
+                netLabel.style.cssText = 'min-width: 60px;';
+
+                const netSelect = makeSiteDropdown(loadTrackerSites(), siteMappings[net.name] || '', (val) => {
+                    const m = loadSiteMappings();
+                    if (val) m[net.name] = val; else delete m[net.name];
+                    saveSiteMappings(m);
+                });
+
+                netHeader.appendChild(expandBtn);
+                netHeader.appendChild(netLabel);
+                netHeader.appendChild(netSelect);
+                netRow.appendChild(netHeader);
+
+                const chanContainer = document.createElement('div');
+                chanContainer.style.cssText = 'display: none; margin-left: 32px; margin-top: 4px;';
+
+                for (const chan of net.channels) {
+                    const chanRow = document.createElement('div');
+                    chanRow.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-bottom: 4px;';
+                    const chanLabel = document.createElement('span');
+                    chanLabel.textContent = chan;
+                    chanLabel.style.cssText = 'min-width: 100px; opacity: 0.7;';
+                    const channelKey = `${net.name}/${chan}`;
+                    const chanSelect = makeSiteDropdown(loadTrackerSites(), siteMappings[channelKey] || '', (val) => {
+                        const m = loadSiteMappings();
+                        if (val) m[channelKey] = val; else delete m[channelKey];
+                        saveSiteMappings(m);
+                    }, true);
+                    chanRow.appendChild(chanLabel);
+                    chanRow.appendChild(chanSelect);
+                    chanContainer.appendChild(chanRow);
+                }
+
+                expandBtn.addEventListener('click', () => {
+                    const hidden = chanContainer.style.display === 'none';
+                    chanContainer.style.display = hidden ? 'block' : 'none';
+                    expandBtn.textContent = hidden ? '\u2212' : '+';
+                });
+
+                netRow.appendChild(chanContainer);
+                modal.appendChild(netRow);
+            }
+        }
+
+        // --- Maintenance ---
+        modal.appendChild(makeH3('Maintenance'));
+
+        const maintRow = document.createElement('div');
+        maintRow.style.cssText = 'display: flex; gap: 8px; flex-wrap: wrap;';
+        const clearCacheBtn = document.createElement('button');
+        clearCacheBtn.className = 'btn';
+        clearCacheBtn.textContent = 'Clear avatar cache';
+        clearCacheBtn.addEventListener('click', () => { clearAvatarCache(); showToast('Avatar cache cleared'); });
+        maintRow.appendChild(clearCacheBtn);
+
+        const resetBtn = document.createElement('button');
+        resetBtn.className = 'btn';
+        resetBtn.textContent = 'Reset all settings';
+        resetBtn.addEventListener('click', () => {
+            if (!confirm('Reset all USB settings, site mappings, and avatar cache?')) return;
+            for (const key of storeKeys('')) storeDelete(key);
+            clearAvatarCache();
+            CONFIG = loadSettings();
+            overlay.remove();
+            showToast('All settings reset');
+        });
+        maintRow.appendChild(resetBtn);
+        modal.appendChild(maintRow);
+
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
     }
 
-    // Called on page load to process any shoutbox messages already present,
-    // before the observer starts watching for new messages
+    // Modal helper functions
+    function makeH3(text) {
+        const h = document.createElement('h3');
+        h.textContent = text;
+        h.style.cssText = 'margin: 16px 0 8px 0; font-size: 15px; border-bottom: 1px solid var(--body-color-muted, #444); padding-bottom: 4px;';
+        return h;
+    }
+
+    function makeCheckbox(id, labelText, checked, onChange, disabled) {
+        const label = document.createElement('label');
+        label.style.cssText = 'display: block; margin: 6px 0; cursor: pointer;' + (disabled ? ' opacity: 0.4; pointer-events: none;' : '');
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.id = id;
+        input.checked = checked;
+        input.disabled = !!disabled;
+        input.addEventListener('change', () => onChange(input.checked));
+        label.appendChild(input);
+        label.appendChild(document.createTextNode(' ' + labelText));
+        return label;
+    }
+
+    function makeTextInput(labelText, value, placeholder, onChange, width) {
+        const wrapper = document.createElement('div');
+        const label = document.createElement('label');
+        label.textContent = labelText;
+        label.style.cssText = 'display: block; font-size: 12px; opacity: 0.7; margin-bottom: 2px;';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'input';
+        input.value = value;
+        input.placeholder = placeholder;
+        if (width) input.style.width = width;
+        input.addEventListener('input', () => onChange(input.value));
+        wrapper.appendChild(label);
+        wrapper.appendChild(input);
+        return wrapper;
+    }
+
+    function makeSiteDropdown(sites, currentValue, onChange, includeDefault) {
+        const select = document.createElement('select');
+        select.className = 'input';
+        select.style.cssText = 'flex: 1; max-width: 180px;';
+
+        if (includeDefault) {
+            const defOpt = document.createElement('option');
+            defOpt.value = '';
+            defOpt.textContent = '(network default)';
+            select.appendChild(defOpt);
+            const noneOpt = document.createElement('option');
+            noneOpt.value = '__none__';
+            noneOpt.textContent = '(none)';
+            if (currentValue === '__none__') noneOpt.selected = true;
+            select.appendChild(noneOpt);
+        } else {
+            const noneOpt = document.createElement('option');
+            noneOpt.value = '';
+            noneOpt.textContent = '(none)';
+            select.appendChild(noneOpt);
+        }
+
+        for (const site of sites) {
+            const opt = document.createElement('option');
+            opt.value = site;
+            opt.textContent = site;
+            if (site === currentValue) opt.selected = true;
+            select.appendChild(opt);
+        }
+        select.addEventListener('change', () => onChange(select.value));
+        return select;
+    }
+
+    // =====================================================================
+    //  DEFAULT CSS
+    // =====================================================================
+
+    function injectDefaultStyles() {
+        if (document.querySelector('#usb-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'usb-styles';
+        style.textContent = `
+            .usb-avatar {
+                display: inline-block;
+                vertical-align: middle;
+                margin-right: 4px;
+            }
+            .usb-avatar img {
+                width: 20px;
+                height: 20px;
+                border-radius: 50%;
+                object-fit: cover;
+                vertical-align: middle;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // =====================================================================
+    //  MESSAGE PROCESSING
+    // =====================================================================
+
     function processExistingMessages() {
-        const messages = document.querySelectorAll('.msg'); // Select all message elements
-        messages.forEach(processMessage); // Process each message
+        document.querySelectorAll('.msg').forEach(processMessage);
     }
 
-    // Check if a nick matches any bot pattern (string or regex)
-    function matcherMatches(username) {
-        return CONFIG.MATCHERS.some(pattern =>
-            typeof pattern === 'string'
-                ? pattern === username
-                : pattern instanceof RegExp && pattern.test(username)
-        );
-    }
-
-    // Called by the MutationObserver for each new message
     function processMessage(messageElement) {
-
-        // Removes join/quit messages, if configured
-        // If you'd like to do this in pure CSS instead, use:
-        // div[data-type=join], div[data-type=quit], div[data-type=condensed] { display: none !important; }
         if (CONFIG.REMOVE_JOIN_QUIT) {
-            if (!!messageElement.matches('div[data-type="condensed"],div[data-type="join"],div[data-type="quit"]')) {
-                messageElement.style.display = 'none'; // Hide join/quit messages
+            if (messageElement.matches('div[data-type="condensed"],div[data-type="join"],div[data-type="quit"]')) {
+                messageElement.style.display = 'none';
                 return;
             }
-        };
+        }
 
-        // Get the username
         const fromSpan = messageElement.querySelector('.from .user');
-        const initialUsername = fromSpan ? fromSpan.textContent : '';
+        if (!fromSpan) return;
 
-        // Only parse and reformat if a matcher matches the username
-        if (!initialUsername || !matcherMatches(initialUsername)) return;
+        const initialUsername = fromSpan.textContent;
+        if (!initialUsername) return;
 
-        // Get the channel (from the closest ancestor with data-current-channel)
-        const channel = messageElement.closest('[data-current-channel]')?.getAttribute('data-current-channel');
+        const context = getActiveNetworkAndChannel();
+        const networkName = context?.network || '';
+        const channelName = messageElement.closest('[data-current-channel]')?.getAttribute('data-current-channel') || '';
 
-        // Get the message contents
-        const contentSpan = messageElement.querySelector('.content'); // Select the content span
-        if (!contentSpan) return;
+        fromSpan.setAttribute('data-usb-network', networkName);
+        fromSpan.setAttribute('data-usb-channel', channelName);
 
-        // Parse the message using format handlers
-        const parsed = runFormatHandlers({
-            text: contentSpan.textContent,
-            html: contentSpan.innerHTML,
-            from: initialUsername,
-            chan: channel
-        });
-        // If no handler matched, do nothing
-        if (!parsed) return;
+        const mappedSite = resolveSiteForContext(networkName, channelName);
 
-        // Destructure parsed result
-        const { username, modifyContent, prefixToRemove, metadata } = parsed;
+        const isBridged = matcherMatches(initialUsername);
+        let resolvedUsername = isBridged ? initialUsername : stripIrcPrefix(initialUsername);
 
-        // Check if username changed - if so, we need to handle color matching
-        const usernameChanged = (username !== initialUsername);
+        if (isBridged) {
+            const contentSpan = messageElement.querySelector('.content');
+            if (!contentSpan) return;
 
-        // Add and modify message metadata
-        fromSpan.setAttribute('data-name', username);
-        fromSpan.setAttribute('data-bridged', metadata); // For CSS targeting
-        fromSpan.setAttribute('data-bridged-channel', channel); // For CSS targeting
+            const parsed = runFormatHandlers({
+                text: contentSpan.textContent,
+                html: contentSpan.innerHTML,
+                from: initialUsername,
+                chan: channelName
+            });
 
-        // Add user to autocomplete
-        if (CONFIG.USE_AUTOCOMPLETE) { addUserToAutocomplete(username); }
+            if (parsed) {
+                const { username, modifyContent, prefixToRemove, metadata } = parsed;
+                resolvedUsername = username;
+                const usernameChanged = (username !== initialUsername);
 
-        // Handle color matching if username changed
-        if (usernameChanged) {
-            const colorClass = getUserColor(username);
-            if (colorClass) {
-                applyColorToMessage(fromSpan, colorClass);
-            } else {
-                // Color not available yet, try again after a delay
-                setTimeout(() => {
-                    const retryColorClass = getUserColor(username);
-                    if (retryColorClass) {
-                        applyColorToMessage(fromSpan, retryColorClass);
+                fromSpan.setAttribute('data-name', username);
+                fromSpan.setAttribute('data-usb-bridged', metadata);
+
+                if (CONFIG.USE_AUTOCOMPLETE) addUserToAutocomplete(username);
+
+                if (usernameChanged) {
+                    const colorClass = getUserColor(username);
+                    if (colorClass) {
+                        applyColorToMessage(fromSpan, colorClass);
+                    } else {
+                        setTimeout(() => {
+                            const retryColor = getUserColor(username);
+                            if (retryColor) applyColorToMessage(fromSpan, retryColor);
+                        }, 200);
                     }
-                }, 200);
+                }
+
+                if (CONFIG.USE_DECORATORS) {
+                    fromSpan.textContent = CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R;
+                } else {
+                    fromSpan.textContent = username;
+                }
+
+                if (modifyContent && prefixToRemove) {
+                    removePrefixSurgically(contentSpan, prefixToRemove);
+                }
             }
         }
 
-        // Update the username
-        if (CONFIG.USE_DECORATORS) {
-            fromSpan.textContent = CONFIG.DECORATOR_L + username + CONFIG.DECORATOR_R;
-        } else {
-            fromSpan.textContent = username;
-        }
-
-        // Update the message content using surgical approach or skip content modification
-        if (modifyContent && prefixToRemove) {
-            // Use surgical DOM modification to preserve event listeners and preview functionality
-            const success = removePrefixSurgically(contentSpan, prefixToRemove);
-            if (!success) {
-                console.warn('Surgical prefix removal failed for message from:', username);
+        if (CONFIG.USE_AVATARS && mappedSite) {
+            const fromDiv = messageElement.querySelector('.from');
+            if (fromDiv && !fromDiv.querySelector('.usb-avatar')) {
+                getAvatar(mappedSite, resolvedUsername).then(blobUrl => {
+                    injectAvatar(fromDiv, blobUrl);
+                });
             }
         }
-        // If modifyContent is false, we only transform the username and leave content untouched
     }
 
-    // Create and start observing DOM changes
+    // =====================================================================
+    //  CONTEXT MENU HOOKS
+    // =====================================================================
+
+    let lastContextTarget = null;
+
+    function initializeContextMenuHooks() {
+        const captureTarget = (e) => {
+            const userSpan = e.target.closest('.from .user, .user');
+            lastContextTarget = userSpan || null;
+        };
+        document.addEventListener('click', captureTarget, true);
+        document.addEventListener('contextmenu', captureTarget, true);
+
+        const menuContainer = document.querySelector('#context-menu-container') || document.body;
+        const menuObserver = new MutationObserver(() => {
+            const menu = document.querySelector('#context-menu');
+            if (!menu || menu.querySelector('.usb-context-item')) return;
+            modifyContextMenu(menu);
+        });
+        menuObserver.observe(menuContainer, { childList: true, subtree: true });
+    }
+
+    function modifyContextMenu(menu) {
+        if (!lastContextTarget) return;
+
+        const context = getActiveNetworkAndChannel();
+        if (!context?.network) return;
+
+        const mappedSite = resolveSiteForContext(context.network, context.channel);
+        const isBridged = lastContextTarget.hasAttribute('data-usb-bridged');
+        let displayUsername;
+
+        if (isBridged && lastContextTarget.hasAttribute('data-name')) {
+            displayUsername = lastContextTarget.getAttribute('data-name');
+        } else {
+            const firstItem = menu.querySelector('.context-menu-user');
+            displayUsername = firstItem ? stripIrcPrefix(firstItem.textContent) : null;
+        }
+
+        if (!displayUsername) return;
+
+        if (isBridged) {
+            const firstItem = menu.querySelector('.context-menu-user');
+            if (firstItem) firstItem.textContent = displayUsername;
+        }
+
+        if (CONFIG.USE_AVATARS && mappedSite) {
+            const divider = document.createElement('li');
+            divider.className = 'context-menu-divider usb-context-item';
+            divider.setAttribute('role', 'menuitem');
+            menu.appendChild(divider);
+
+            const refreshItem = document.createElement('li');
+            refreshItem.className = 'context-menu-item usb-context-item';
+            refreshItem.setAttribute('role', 'menuitem');
+            refreshItem.textContent = '(USB) Refresh avatar';
+            refreshItem.addEventListener('click', (e) => {
+                e.stopPropagation();
+                invalidateAvatar(mappedSite, displayUsername);
+                getAvatar(mappedSite, displayUsername).then(blobUrl => {
+                    if (!blobUrl) return;
+                    document.querySelectorAll('.from').forEach(fromDiv => {
+                        const userSpan = fromDiv.querySelector('.user');
+                        if (!userSpan) return;
+                        const name = userSpan.getAttribute('data-name') || stripIrcPrefix(userSpan.textContent);
+                        if (name !== displayUsername) return;
+                        const existing = fromDiv.querySelector('.usb-avatar');
+                        if (existing) existing.querySelector('img').src = blobUrl;
+                        else injectAvatar(fromDiv, blobUrl);
+                    });
+                    showToast(`Avatar refreshed for ${displayUsername}`);
+                });
+                const mc = document.querySelector('#context-menu-container');
+                if (mc) mc.classList.remove('open');
+                menu.remove();
+            });
+            menu.appendChild(refreshItem);
+        }
+    }
+
+    // =====================================================================
+    //  OBSERVER & INITIALIZATION
+    // =====================================================================
+
     const observer = new MutationObserver((mutations) => {
         mutations.forEach((mutation) => {
             mutation.addedNodes.forEach((node) => {
@@ -610,7 +1123,6 @@
         });
     });
 
-    // Start observing when the chat container is available
     function initializeObserver() {
         const chatContainer = document.querySelector('#chat');
         if (chatContainer) {
@@ -621,10 +1133,19 @@
         }
     }
 
-    // Start monitoring vue router to reinit after viewing settings or editing/adding a new network
-    async function initializeRouterMonitor () {
+    function tryInjectFooterButton() {
+        if (document.querySelector('#footer')) {
+            injectFooterButton();
+        }
+        const footerObserver = new MutationObserver(() => injectFooterButton());
+        const app = document.querySelector('#app') || document.body;
+        footerObserver.observe(app, { childList: true, subtree: true });
+    }
+
+    async function initializeRouterMonitor() {
         const router = Array.from(document.querySelectorAll('*'))
-                .find(e => e.__vue_app__)?.__vue_app__?.config?.globalProperties?.$router;
+            .find(e => e.__vue_app__)
+            ?.__vue_app__?.config?.globalProperties?.$router;
 
         if (router == null) {
             return setTimeout(initializeRouterMonitor, 1000);
@@ -632,12 +1153,26 @@
         await router.isReady();
 
         router.afterEach((newRoute, oldRoute) => {
-            if (oldRoute.name === 'RoutedChat' || newRoute.name !== 'RoutedChat') return
+            if (oldRoute.name === 'RoutedChat' || newRoute.name !== 'RoutedChat') return;
             initializeObserver();
         });
     }
 
-    // Start the initialization process
-    initializeRouterMonitor();
-    initializeObserver();
+    // =====================================================================
+    //  ENTRYPOINT
+    // =====================================================================
+
+    async function main() {
+        const isLounge = await waitForTheLounge();
+        if (!isLounge) return; // Script only runs on TheLounge
+
+        injectDefaultStyles();
+        initializeRouterMonitor();
+        initializeObserver();
+        tryInjectFooterButton();
+        initializeContextMenuHooks();
+    }
+
+    main();
+
 })();
