@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      3.0-dev0.2
+// @version      3.0-dev0.3
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -21,6 +21,49 @@
     // =====================================================================
 
     const HAS_GM_XHR = typeof GM_xmlhttpRequest !== 'undefined';
+
+    // =====================================================================
+    //  TRACKER SITE CONFIG TABLE
+    // =====================================================================
+    //
+    // Per-site configuration for UNIT3D integration features.
+    // 'default' is used for any site not explicitly listed.
+    // {user} is replaced with the username at runtime.
+    //
+    // To add a new site override, copy the default block and modify.
+    // Set a feature to false to disable it for that site.
+
+    const SITE_CONFIG = {
+        'default': {
+            urlAvatar: '/authenticated-images/user-avatars/{user}',
+            urlIcon: '/authenticated-images/user-icons/{user}',
+            urlProfile: '/users/{user}',
+            featGroupIcon: true,
+            featGroupName: true,
+            featCustomIcon: true,
+            featProfile: true,
+            featOnlineWidget: true,
+        },
+        'hawke.uno': {
+            urlAvatar: '/files/img/{user}.png',
+            urlIcon: false,
+            urlProfile: false,     // HUNO profiles use unpredictable IDs
+            featGroupIcon: false,   // No online users widget to scrape
+            featGroupName: false,
+            featCustomIcon: false,
+            featProfile: false,
+            featOnlineWidget: false,
+        },
+    };
+
+    function getSiteConfig(site) {
+        return SITE_CONFIG[site] || SITE_CONFIG['default'];
+    }
+
+    function buildSiteUrl(site, template, username) {
+        if (!template) return null;
+        return `https://${site}${template.replace('{user}', username)}`;
+    }
 
     // =====================================================================
     //  STORAGE (localStorage with usb_ prefix)
@@ -62,6 +105,10 @@
         USE_AUTOCOMPLETE: true,
         USE_DECORATORS: true,
         USE_AVATARS: false,
+        USE_GROUP_ICON: true,
+        USE_CUSTOM_ICON: true,
+        USE_SPARKLES: true,
+        USE_GROUP_COLORS: false,
         REMOVE_JOIN_QUIT: false,
         DECORATOR_L: '(',
         DECORATOR_R: ')',
@@ -270,7 +317,8 @@
         if (avatarInflight.has(cacheKey)) return avatarInflight.get(cacheKey);
 
         const fetchPromise = new Promise((resolve) => {
-            const url = `https://${site}/authenticated-images/user-avatars/${username}`;
+            const url = buildSiteUrl(site, getSiteConfig(site).urlAvatar, username);
+            if (!url) { resolve(DEFAULT_AVATAR); return; }
 
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -319,28 +367,383 @@
         fromDiv.insertBefore(wrapper, fromDiv.firstChild);
     }
 
+    /**
+     * Inject UNIT3D metadata into a message's .user span.
+     * Adds: group icon, data-usb-group attribute, sparkles, custom icon,
+     *       and --usb-unit3d-color CSS variable.
+     */
+    function injectUserMeta(fromSpan, site, meta) {
+        if (!meta || fromSpan.hasAttribute('data-usb-group')) return;
+
+        // CSS variable for optional UNIT3D color override
+        fromSpan.style.setProperty('--usb-unit3d-color', meta.rankColor);
+
+        // data attribute for CSS targeting
+        fromSpan.setAttribute('data-usb-group', meta.rank);
+
+        // Apply group colors class if enabled
+        if (CONFIG.USE_GROUP_COLORS) {
+            fromSpan.classList.add('usb-unit3d-colors');
+        }
+
+        // Group icon — inserted into .from div (after avatar, before .user span)
+        // Placed outside .user span to survive Vue re-renders.
+        if (CONFIG.USE_GROUP_ICON && meta.iconClasses) {
+            const fromDiv = fromSpan.closest('.from');
+            if (fromDiv && !fromDiv.querySelector('.usb-group')) {
+                ensureFontAwesome();
+                const icon = document.createElement('i');
+                icon.className = 'usb-group ' + meta.iconClasses;
+                icon.title = meta.rank;
+                icon.style.setProperty('--usb-unit3d-color', meta.rankColor);
+
+                // Copy the nick's color class so the icon matches the username
+                const colorClass = Array.from(fromSpan.classList).find(c => c.startsWith('color-'));
+                if (colorClass) icon.classList.add(colorClass);
+
+                // If group colors enabled, override with UNIT3D rank color
+                if (CONFIG.USE_GROUP_COLORS) {
+                    icon.classList.add('usb-unit3d-colors');
+                }
+
+                fromDiv.insertBefore(icon, fromSpan);
+            }
+        }
+
+        // Sparkles — CSS background on the .user span
+        if (CONFIG.USE_SPARKLES && meta.isSparkly && site) {
+            fromSpan.classList.add('usb-sparkles');
+            fromSpan.style.backgroundImage = `url(https://${site}/img/sparkels.gif)`;
+        }
+    }
+
+    // Custom icon cache (same pattern as avatars)
+    const customIconCache = new Map();
+    const customIconInflight = new Map();
+
+    function fetchCustomIcon(site, username) {
+        const cacheKey = `${site}/${username}`;
+        if (customIconCache.has(cacheKey)) return Promise.resolve(customIconCache.get(cacheKey));
+        if (customIconInflight.has(cacheKey)) return customIconInflight.get(cacheKey);
+        if (!HAS_GM_XHR) return Promise.resolve(null);
+
+        const url = buildSiteUrl(site, getSiteConfig(site).urlIcon, username);
+        if (!url) return Promise.resolve(null);
+
+        const fetchPromise = new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                responseType: 'blob',
+                onload(response) {
+                    customIconInflight.delete(cacheKey);
+                    if (response.status >= 200 && response.status < 300 && response.response.size > 0) {
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            customIconCache.set(cacheKey, reader.result);
+                            resolve(reader.result);
+                        };
+                        reader.onerror = () => { customIconCache.set(cacheKey, null); resolve(null); };
+                        reader.readAsDataURL(response.response);
+                    } else {
+                        customIconCache.set(cacheKey, null);
+                        resolve(null);
+                    }
+                },
+                onerror() {
+                    customIconInflight.delete(cacheKey);
+                    customIconCache.set(cacheKey, null);
+                    resolve(null);
+                },
+            });
+        });
+
+        customIconInflight.set(cacheKey, fetchPromise);
+        return fetchPromise;
+    }
+
+    function injectCustomIcon(fromSpan, dataUrl) {
+        if (!dataUrl || fromSpan.querySelector('.usb-icon')) return;
+        const wrapper = document.createElement('span');
+        wrapper.className = 'usb-icon';
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        img.alt = 'Custom user icon';
+        img.loading = 'lazy';
+        wrapper.appendChild(img);
+        fromSpan.appendChild(wrapper);
+    }
+
+    // =====================================================================
+    //  FONTAWESOME ICON SUPPORT
+    // =====================================================================
+    //
+    // TheLounge bundles FA Solid font but not the full CSS.
+    // We inject the FA 6 Free CDN stylesheet to get all icon classes
+    // working, including brands. This is manager-agnostic (no @require).
+
+    let faLoaded = false;
+
+    function ensureFontAwesome() {
+        if (faLoaded) return;
+        faLoaded = true;
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css';
+        link.crossOrigin = 'anonymous';
+        document.head.appendChild(link);
+    }
+    // =====================================================================
+    //
+    // Scrapes the "online users" widget from UNIT3D sites to build a
+    // local database of rank, rank color, icon class, donor status, etc.
+    // Falls back to individual profile page fetches for cache misses.
+
+    const META_PREFIX = 'meta_';
+    const META_TTL = 24 * 60 * 60 * 1000; // 24 hours
+    const SCRAPE_INTERVAL = 15 * 60 * 1000; // 15 minutes
+    const PROFILE_MISS_LIMIT = 5; // max consecutive profile fetches before stopping
+    const scrapeTimers = new Map();
+    let profileMissCount = 0;
+
+    function readUserMeta(site, username) {
+        const entry = storeGet(META_PREFIX + site + '/' + username);
+        if (!entry || !entry.fetchedAt) return null;
+        if ((Date.now() - entry.fetchedAt) > META_TTL) {
+            storeDelete(META_PREFIX + site + '/' + username);
+            return null;
+        }
+        return entry;
+    }
+
+    function writeUserMeta(site, username, data) {
+        storeSet(META_PREFIX + site + '/' + username, {
+            ...data,
+            fetchedAt: Date.now()
+        });
+    }
+
+    /**
+     * Parse the online users widget from a full page HTML string.
+     * Returns a Map of username → { rank, rankColor, iconClasses, hasCustomIcon, isSparkly }
+     */
+    function parseOnlineUsersWidget(html) {
+        const users = new Map();
+
+        // Check widget exists (case-insensitive)
+        if (!/users\s+online/i.test(html)) return users;
+
+        // Parse user-tag__link anchors
+        const userPattern = /<a\s+class="user-tag__link(?:\s+user-tag__link--anonymous)?\s+(fa[^"]*?)"\s+href="https?:\/\/[^/]+\/users\/([^"]+)"\s+style="color:\s*([^"]*?)"\s+title="([^"]*?)"/g;
+        let match;
+        while ((match = userPattern.exec(html)) !== null) {
+            const [, iconClasses, username, color, rank] = match;
+            if (!users.has(username)) {
+                users.set(username, {
+                    rank,
+                    rankColor: color.trim(),
+                    iconClasses: iconClasses.trim(),
+                    hasCustomIcon: false,
+                    isSparkly: false,
+                });
+            }
+        }
+
+        // Cross-reference custom icons
+        const iconPattern = /authenticated-images\/user-icons\/([a-zA-Z0-9_-]+)/g;
+        let iconMatch;
+        while ((iconMatch = iconPattern.exec(html)) !== null) {
+            const data = users.get(iconMatch[1]);
+            if (data) data.hasCustomIcon = true;
+        }
+
+        // Cross-reference sparkly (donor) backgrounds
+        // The sparkle background is on the parent span, so we look for it before the <a>
+        const sparklePattern = /background-image:\s*url\(\/img\/sparkels\.gif\);[^<]*?(?:<[^a]*?)*?<a[^>]*?\/users\/([^"]+)"/g;
+        let sparkleMatch;
+        while ((sparkleMatch = sparklePattern.exec(html)) !== null) {
+            const data = users.get(sparkleMatch[1]);
+            if (data) data.isSparkly = true;
+        }
+
+        return users;
+    }
+
+    /**
+     * Scrape online users from a tracker site and cache the results.
+     */
+    function scrapeOnlineUsers(site) {
+        if (!HAS_GM_XHR) return Promise.resolve(0);
+
+        const config = getSiteConfig(site);
+        if (!config.featOnlineWidget) return Promise.resolve(0);
+
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://${site}`,
+                responseType: 'text',
+                onload(response) {
+                    if (response.status !== 200) {
+                        console.warn(`[USB] Scrape failed for ${site}: HTTP ${response.status}`);
+                        resolve(0);
+                        return;
+                    }
+                    const users = parseOnlineUsersWidget(response.responseText);
+                    let count = 0;
+                    for (const [username, data] of users) {
+                        writeUserMeta(site, username, data);
+                        count++;
+                    }
+                    if (count > 0) {
+                        console.log(`[USB] Scraped ${count} users from ${site}`);
+                    }
+                    profileMissCount = 0; // reset miss counter on successful bulk scrape
+                    resolve(count);
+                },
+                onerror() {
+                    console.warn(`[USB] Scrape request failed for ${site}`);
+                    resolve(0);
+                },
+            });
+        });
+    }
+
+    /**
+     * Fetch metadata for a single user from their profile page.
+     * Used as a fallback when the user isn't in the online widget cache.
+     */
+    function scrapeUserProfile(site, username) {
+        if (!HAS_GM_XHR) return Promise.resolve(null);
+
+        const config = getSiteConfig(site);
+        if (!config.featProfile || !config.urlProfile) return Promise.resolve(null);
+
+        // Rate-limit consecutive profile fetches
+        if (profileMissCount >= PROFILE_MISS_LIMIT) {
+            console.warn(`[USB] Profile fetch limit reached (${PROFILE_MISS_LIMIT}), skipping ${username}`);
+            return Promise.resolve(null);
+        }
+        profileMissCount++;
+
+        const url = buildSiteUrl(site, config.urlProfile, username);
+        if (!url) return Promise.resolve(null);
+
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                responseType: 'text',
+                onload(response) {
+                    if (response.status !== 200) {
+                        resolve(null);
+                        return;
+                    }
+
+                    const html = response.responseText;
+
+                    // Parse the user-tag from their profile page
+                    // Same structure as the online widget but only one user
+                    const userPattern = /<a\s+class="user-tag__link(?:\s+user-tag__link--anonymous)?\s+(fa[^"]*?)"\s+href="https?:\/\/[^/]+\/users\/[^"]+"\s+style="color:\s*([^"]*?)"\s+title="([^"]*?)"/;
+                    const match = html.match(userPattern);
+
+                    if (!match) {
+                        resolve(null);
+                        return;
+                    }
+
+                    const data = {
+                        rank: match[3],
+                        rankColor: match[2].trim(),
+                        iconClasses: match[1].trim(),
+                        hasCustomIcon: /authenticated-images\/user-icons\//i.test(html),
+                        isSparkly: /background-image:\s*url\(\/img\/sparkels\.gif\)/i.test(html),
+                    };
+
+                    writeUserMeta(site, username, data);
+                    resolve(data);
+                },
+                onerror() { resolve(null); },
+            });
+        });
+    }
+
+    /**
+     * Get user metadata: check cache first, then optionally fetch from profile.
+     * Returns { rank, rankColor, iconClasses, hasCustomIcon, isSparkly } or null.
+     */
+    function getUserMeta(site, username, fetchOnMiss = true) {
+        const cached = readUserMeta(site, username);
+        if (cached) return Promise.resolve(cached);
+        if (!fetchOnMiss) return Promise.resolve(null);
+        return scrapeUserProfile(site, username);
+    }
+
+    /**
+     * Start periodic scraping for a site.
+     */
+    function startScrapeSchedule(site) {
+        if (scrapeTimers.has(site)) return;
+        // Initial scrape
+        scrapeOnlineUsers(site);
+        // Repeat every SCRAPE_INTERVAL
+        const timer = setInterval(() => scrapeOnlineUsers(site), SCRAPE_INTERVAL);
+        scrapeTimers.set(site, timer);
+    }
+
+    /**
+     * Start scraping for all mapped sites.
+     */
+    async function initializeMetadataScraping() {
+        const mappings = loadSiteMappings();
+        const sites = new Set();
+        for (const value of Object.values(mappings)) {
+            if (value && value !== '__none__') sites.add(value);
+        }
+
+        // Run initial scrapes and wait for them to complete
+        const initialScrapes = [];
+        for (const site of sites) {
+            const config = getSiteConfig(site);
+            if (config.featOnlineWidget) {
+                initialScrapes.push(scrapeOnlineUsers(site));
+            }
+        }
+        await Promise.all(initialScrapes);
+
+        // Then start periodic scraping
+        for (const site of sites) {
+            const config = getSiteConfig(site);
+            if (config.featOnlineWidget && !scrapeTimers.has(site)) {
+                const timer = setInterval(() => scrapeOnlineUsers(site), SCRAPE_INTERVAL);
+                scrapeTimers.set(site, timer);
+            }
+        }
+    }
+
     // =====================================================================
     //  MATCHERS
     // =====================================================================
 
     const MATCHERS = [
         'Chatbot',          // ATH
-        '%ULCX',            // ULCX
-        '@Willie',          // BHD
-        '@WALL-E',          // RFX
-        'BBot', '@BBot',    // HHD
-        '&darkpeers',       // DP
+        'ULCX',             // ULCX
+        'Willie',           // BHD
+        'WALL-E',           // RFX
+        'BBot',             // HHD
+        'darkpeers',        // DP
         'Bot',              // LST
-        '+Mellos',          // HUNO (Discord)
-        /.+?-web/,          // HUNO (Shoutbox)
-        '&Sauron',          // ANT
-        '+bridgebot',       // OE+
+        'Mellos',           // HUNO (Discord)
+        /.+?-web/,          // HUNO (Shoutbox) — regex gets raw username
+        'Sauron',           // ANT
+        'bridgebot',        // OE+
     ];
 
     function matcherMatches(username) {
+        const bare = stripIrcPrefix(username);
         return MATCHERS.some(pattern =>
             typeof pattern === 'string'
-                ? pattern === username
+                ? pattern === bare
                 : pattern instanceof RegExp && pattern.test(username)
         );
     }
@@ -668,9 +1071,22 @@
         modal.appendChild(makeH3('General'));
 
         modal.appendChild(makeCheckbox('usb-autocomplete', 'Enable autocomplete for bridged usernames', CONFIG.USE_AUTOCOMPLETE, (v) => { CONFIG.USE_AUTOCOMPLETE = v; saveSettings(CONFIG); }));
-        modal.appendChild(makeCheckbox('usb-decorators', 'Enable username decorators', CONFIG.USE_DECORATORS, (v) => { CONFIG.USE_DECORATORS = v; saveSettings(CONFIG); }));
-        modal.appendChild(makeCheckbox('usb-avatars', 'Enable user avatars' + (HAS_GM_XHR ? '' : ' (requires userscript manager)'), CONFIG.USE_AVATARS && HAS_GM_XHR, (v) => { CONFIG.USE_AVATARS = v; saveSettings(CONFIG); }, !HAS_GM_XHR));
         modal.appendChild(makeCheckbox('usb-join-quit', 'Remove join/quit messages', CONFIG.REMOVE_JOIN_QUIT, (v) => { CONFIG.REMOVE_JOIN_QUIT = v; saveSettings(CONFIG); }));
+
+        // --- UNIT3D Integration section ---
+        modal.appendChild(makeH3('UNIT3D Integration'));
+
+        const gmNote = HAS_GM_XHR ? '' : ' (requires userscript manager)';
+        modal.appendChild(makeCheckbox('usb-avatars', 'Avatars' + gmNote, CONFIG.USE_AVATARS && HAS_GM_XHR, (v) => { CONFIG.USE_AVATARS = v; saveSettings(CONFIG); }, !HAS_GM_XHR));
+        modal.appendChild(makeCheckbox('usb-group-icon', 'Group icon' + gmNote, CONFIG.USE_GROUP_ICON && HAS_GM_XHR, (v) => { CONFIG.USE_GROUP_ICON = v; saveSettings(CONFIG); }, !HAS_GM_XHR));
+        modal.appendChild(makeCheckbox('usb-custom-icon', 'Custom user icon' + gmNote, CONFIG.USE_CUSTOM_ICON && HAS_GM_XHR, (v) => { CONFIG.USE_CUSTOM_ICON = v; saveSettings(CONFIG); }, !HAS_GM_XHR));
+        modal.appendChild(makeCheckbox('usb-sparkles', 'Sparkles (donor effect)' + gmNote, CONFIG.USE_SPARKLES && HAS_GM_XHR, (v) => { CONFIG.USE_SPARKLES = v; saveSettings(CONFIG); }, !HAS_GM_XHR));
+        modal.appendChild(makeCheckbox('usb-group-colors', 'Group colors (overrides nick colors)', CONFIG.USE_GROUP_COLORS, (v) => { CONFIG.USE_GROUP_COLORS = v; saveSettings(CONFIG); }));
+
+        // --- Bridged Messages section ---
+        modal.appendChild(makeH3('Bridged Messages'));
+
+        modal.appendChild(makeCheckbox('usb-decorators', 'Username decorators', CONFIG.USE_DECORATORS, (v) => { CONFIG.USE_DECORATORS = v; saveSettings(CONFIG); }));
 
         const decRow = document.createElement('div');
         decRow.style.cssText = 'display: flex; gap: 12px; margin: 8px 0;';
@@ -935,6 +1351,30 @@
                 object-fit: cover;
                 vertical-align: middle;
             }
+            .usb-group {
+                vertical-align: middle;
+                margin-right: 3px;
+            }
+            .usb-icon {
+                display: inline-block;
+                vertical-align: middle;
+                margin-left: 3px;
+            }
+            .usb-icon img {
+                width: 16px;
+                height: 16px;
+                object-fit: cover;
+                vertical-align: middle;
+            }
+            .usb-sparkles {
+                background-repeat: repeat;
+                background-size: auto;
+                padding: 1px 3px;
+                border-radius: 3px;
+            }
+            .usb-unit3d-colors {
+                color: var(--usb-unit3d-color) !important;
+            }
         `;
         document.head.appendChild(style);
     }
@@ -1021,8 +1461,30 @@
         if (CONFIG.USE_AVATARS && mappedSite) {
             const fromDiv = messageElement.querySelector('.from');
             if (fromDiv && !fromDiv.querySelector('.usb-avatar')) {
-                getAvatar(mappedSite, resolvedUsername).then(blobUrl => {
-                    injectAvatar(fromDiv, blobUrl);
+                getAvatar(mappedSite, resolvedUsername).then(avatarUrl => {
+                    injectAvatar(fromDiv, avatarUrl);
+                });
+            }
+        }
+
+        // --- UNIT3D metadata injection (group icon, sparkles, custom icon) ---
+        if (mappedSite && (CONFIG.USE_GROUP_ICON || CONFIG.USE_SPARKLES || CONFIG.USE_CUSTOM_ICON || CONFIG.USE_GROUP_COLORS)) {
+            if (!fromSpan.hasAttribute('data-usb-group')) {
+                // Don't trigger profile fetches from message processing — rely on periodic scrape.
+                // Profile fetches are only triggered by explicit "Refresh user data" context menu.
+                getUserMeta(mappedSite, resolvedUsername, false).then(meta => {
+                    if (!meta) return;
+                    injectUserMeta(fromSpan, mappedSite, meta);
+
+                    // Custom icon (async fetch + inject)
+                    if (CONFIG.USE_CUSTOM_ICON && meta.hasCustomIcon) {
+                        const siteConfig = getSiteConfig(mappedSite);
+                        if (siteConfig.urlIcon && siteConfig.featCustomIcon) {
+                            fetchCustomIcon(mappedSite, resolvedUsername).then(dataUrl => {
+                                injectCustomIcon(fromSpan, dataUrl);
+                            });
+                        }
+                    }
                 });
             }
         }
@@ -1065,7 +1527,7 @@
             displayUsername = lastContextTarget.getAttribute('data-name');
         } else {
             const firstItem = menu.querySelector('.context-menu-user');
-            displayUsername = firstItem ? stripIrcPrefix(firstItem.textContent) : null;
+            displayUsername = firstItem ? stripIrcPrefix(firstItem.textContent.trim()) : null;
         }
 
         if (!displayUsername) return;
@@ -1075,37 +1537,89 @@
             if (firstItem) firstItem.textContent = displayUsername;
         }
 
-        if (CONFIG.USE_AVATARS && mappedSite) {
-            const divider = document.createElement('li');
-            divider.className = 'context-menu-divider usb-context-item';
-            divider.setAttribute('role', 'menuitem');
-            menu.appendChild(divider);
+        // Only add USB context items if a site is mapped
+        if (!mappedSite) return;
 
-            const refreshItem = document.createElement('li');
-            refreshItem.className = 'context-menu-item usb-context-item';
-            refreshItem.setAttribute('role', 'menuitem');
-            refreshItem.textContent = '(USB) Refresh avatar';
-            refreshItem.addEventListener('click', (e) => {
-                e.stopPropagation();
-                invalidateAvatar(mappedSite, displayUsername);
-                getAvatar(mappedSite, displayUsername).then(blobUrl => {
-                    if (!blobUrl) return;
-                    document.querySelectorAll('.from').forEach(fromDiv => {
-                        const userSpan = fromDiv.querySelector('.user');
-                        if (!userSpan) return;
-                        const name = userSpan.getAttribute('data-name') || stripIrcPrefix(userSpan.textContent);
-                        if (name !== displayUsername) return;
-                        const existing = fromDiv.querySelector('.usb-avatar');
-                        if (existing) existing.querySelector('img').src = blobUrl;
-                        else injectAvatar(fromDiv, blobUrl);
-                    });
-                    showToast(`Avatar refreshed for ${displayUsername}`);
+        const siteConfig = getSiteConfig(mappedSite);
+
+        const divider = document.createElement('li');
+        divider.className = 'context-menu-divider usb-context-item';
+        divider.setAttribute('role', 'menuitem');
+        menu.appendChild(divider);
+
+        // "Refresh user data" — invalidates avatar + metadata, re-fetches from profile
+        const refreshItem = document.createElement('li');
+        refreshItem.className = 'context-menu-item usb-context-item';
+        refreshItem.setAttribute('role', 'menuitem');
+        refreshItem.textContent = 'Refresh user data';
+        refreshItem.addEventListener('click', (e) => {
+            e.stopPropagation();
+
+            // Invalidate avatar cache
+            invalidateAvatar(mappedSite, displayUsername);
+
+            // Invalidate metadata cache
+            storeDelete(META_PREFIX + mappedSite + '/' + displayUsername);
+
+            // Invalidate custom icon cache
+            customIconCache.delete(`${mappedSite}/${displayUsername}`);
+
+            // Re-fetch avatar
+            getAvatar(mappedSite, displayUsername).then(avatarUrl => {
+                document.querySelectorAll('.from').forEach(fromDiv => {
+                    const userSpan = fromDiv.querySelector('.user');
+                    if (!userSpan) return;
+                    const name = userSpan.getAttribute('data-name') || stripIrcPrefix(userSpan.textContent.replace(/[()]/g, '').trim());
+                    if (name !== displayUsername) return;
+                    const existing = fromDiv.querySelector('.usb-avatar');
+                    if (existing) existing.querySelector('img').src = avatarUrl;
+                    else injectAvatar(fromDiv, avatarUrl);
                 });
+            });
+
+            // Re-fetch metadata from profile page
+            scrapeUserProfile(mappedSite, displayUsername).then(meta => {
+                if (!meta) return;
+                document.querySelectorAll('.from .user').forEach(userSpan => {
+                    const name = userSpan.getAttribute('data-name') || stripIrcPrefix(userSpan.textContent.replace(/[()]/g, '').trim());
+                    if (name !== displayUsername) return;
+                    // Clear existing injected elements
+                    userSpan.querySelectorAll('.usb-group, .usb-icon').forEach(el => el.remove());
+                    userSpan.removeAttribute('data-usb-group');
+                    userSpan.classList.remove('usb-sparkles', 'usb-unit3d-colors');
+                    userSpan.style.removeProperty('background-image');
+                    // Re-inject
+                    injectUserMeta(userSpan, mappedSite, meta);
+                    if (CONFIG.USE_CUSTOM_ICON && meta.hasCustomIcon && siteConfig.urlIcon && siteConfig.featCustomIcon) {
+                        fetchCustomIcon(mappedSite, displayUsername).then(dataUrl => {
+                            injectCustomIcon(userSpan, dataUrl);
+                        });
+                    }
+                });
+                showToast(`Refreshed data for ${displayUsername}`);
+            });
+
+            const mc = document.querySelector('#context-menu-container');
+            if (mc) mc.classList.remove('open');
+            menu.remove();
+        });
+        menu.appendChild(refreshItem);
+
+        // "Tracker profile" — link to user's profile on the tracker
+        if (siteConfig.featProfile && siteConfig.urlProfile) {
+            const profileItem = document.createElement('li');
+            profileItem.className = 'context-menu-item usb-context-item';
+            profileItem.setAttribute('role', 'menuitem');
+            profileItem.textContent = 'Tracker profile';
+            profileItem.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const profileUrl = buildSiteUrl(mappedSite, siteConfig.urlProfile, displayUsername);
+                if (profileUrl) window.open(profileUrl, '_blank');
                 const mc = document.querySelector('#context-menu-container');
                 if (mc) mc.classList.remove('open');
                 menu.remove();
             });
-            menu.appendChild(refreshItem);
+            menu.appendChild(profileItem);
         }
     }
 
@@ -1164,13 +1678,18 @@
 
     async function main() {
         const isLounge = await waitForTheLounge();
-        if (!isLounge) return; // Script only runs on TheLounge
+        if (!isLounge) return;
 
         injectDefaultStyles();
         initializeRouterMonitor();
-        initializeObserver();
         tryInjectFooterButton();
         initializeContextMenuHooks();
+
+        // Start metadata scraping first, wait for initial scrape to populate cache
+        await initializeMetadataScraping();
+
+        // Now process messages (metadata cache is warm)
+        initializeObserver();
     }
 
     main();
