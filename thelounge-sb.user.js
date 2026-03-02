@@ -1,17 +1,87 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      3.0-dev0.3
+// @version      3.0-dev0.4
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
-// @match        *://your-thelounge-domain.com/*
+// @match        *://irc.badkitty.zone/*
 //
 // @connect      aither.cc
+// @connect      blutopia.cc
+// @connect      hawke.uno
+// @connect      lst.gg
+// @connect      reelflix.cc
+// @connect      seedpool.org
+// @connect      upload.cx
 //
 // @icon         https://thelounge.chat/favicon.ico
 // @grant        GM_xmlhttpRequest
 // @run-at       document-start
 // ==/UserScript==
+
+// This is a reworked version of the original script that adds:
+// - Handler architecture: Makes it easier to add new formats
+// - Custom decorators: Set a prefix/suffix for bridged usernames
+// - DOM metadata: Completely customize appearance with TheLounge theme CSS
+// - Regex matcher support: Pair with custom handlers to do almost anything
+// - Preview support: Surgical DOM modification preserves link previews and event listeners
+// - More handlers: BHD, extensive HUNO support
+// - Nick coloring: Bridged usernames get proper TheLounge colors instead of inheriting bot colors
+// - Settings UI: Floating modal, decoupled from TheLounge's settings
+// - Site mappings: Associate networks/channels with tracker sites for avatar resolution
+// - Avatar support: Fetches and caches authenticated user avatars from UNIT3D sites
+
+// CREDITS:
+// fulcrum: Original script (https://aither.cc/forums/topics/3874)
+// marks: Autocomplete enablement (https://aither.cc/forums/topics/3874/posts/32274)
+
+// INSTALLATION:
+// - Install Tampermonkey, Violentmonkey, or inject the script directly
+// - Set the @match to the IP or domain you access TheLounge on
+// - For avatar support: add @connect entries for each tracker site
+// - Core features work without any userscript manager
+
+// TROUBLESHOOTING:
+// - Make sure @match is set to your TheLounge domain
+// - Try disabling autocomplete (gear icon > Shoutbox Beautifier)
+// - Check the browser console for errors
+// - When in doubt, simply refresh the page
+
+// CHANGELOG:
+// - 1.0 - (spindrift) Initial release
+// - 2.0 - (spindrift) Fix link previews, change return structure
+// - 2.1 - (spindrift) Sanitize zero-width characters (fixes HUNO Discord handler)
+// - 2.2 - (sparrow) Add option to hide join/quit messages, add TheLounge icon
+// - 2.3 - (spindrift) Add color matching - bridged usernames get proper TheLounge colors
+// - 2.4 - (AnabolicsAnonymous) Update ULCX matchers
+// - 2.5 - (spindrift) Add ANT support (thanks JCDenton for initial work)
+// - 2.6 - (FortKnox1337) Add RFX support, enable DP and HHD support, fix ANT/BHD support
+// - 2.7 - (cmd430) Enable OE+ support, fix config indents, fix non-chat page breakage
+// - 3.0 - (spindrift) Avatars, site mappings, floating settings modal, localStorage,
+//          data-usb-* attributes, no userscript manager required for core features
+
+// CSS STYLING:
+// Custom CSS can be added in TheLounge > Settings > Appearance.
+//
+// Universal attributes (set on EVERY message):
+// - data-usb-network: the network name (e.g., 'ATH', 'ULCX', 'BHD')
+// - data-usb-channel: the channel name (e.g., '#General', '#huno')
+//
+// Bridged-only attribute (set on messages matched by a handler):
+// - data-usb-bridged: metadata prefix (e.g., 'SB', or an abbreviated rank)
+//
+//   Examples:
+//   - Italicize all bridged usernames:
+//     span[data-usb-bridged] { font-style: italic; }
+//
+//   - Style all messages from the ATH network:
+//     .msg .from span[data-usb-network="ATH"] { color: gold; }
+//
+//   - Style messages from a specific network AND channel:
+//     span[data-usb-network="P2P"][data-usb-channel="#blutopia"] { font-weight: bold; }
+//
+//   - Customize avatar size:
+//     .usb-avatar, .usb-avatar img { width: 28px; height: 28px; }
 
 (function () {
     'use strict';
@@ -38,26 +108,40 @@
             urlAvatar: '/authenticated-images/user-avatars/{user}',
             urlIcon: '/authenticated-images/user-icons/{user}',
             urlProfile: '/users/{user}',
+            faFontPath: '/build/assets/fa-solid-900-6nmD8yp-.woff2',
             featGroupIcon: true,
             featGroupName: true,
             featCustomIcon: true,
             featProfile: true,
-            featOnlineWidget: true,
         },
         'hawke.uno': {
             urlAvatar: '/files/img/{user}.png',
             urlIcon: false,
-            urlProfile: false,     // HUNO profiles use unpredictable IDs
-            featGroupIcon: false,   // No online users widget to scrape
+            urlProfile: false,
+            faFontPath: false,      // HUNO doesn't serve FA Pro to us
+            featGroupIcon: false,
             featGroupName: false,
             featCustomIcon: false,
             featProfile: false,
-            featOnlineWidget: false,
+        },
+        'blutopia.cc': {
+            faFontPath: '/build/assets/fa-solid-900-DTJu368G.woff2',
+        },
+        'beyond-hd.me': {
+            faFontPath: '/fonts/vendor/@fortawesome/fontawesome-pro/webfa-solid-900.woff2',
+        },
+        'capybarabr.com': {
+            faFontPath: '/build/assets/fa-solid-900-Op5g_Mqf.woff2',
+        },
+        'luminarr.me': {
+            faFontPath: '/build/assets/fa-solid-900-DSjGxeID.woff2',
         },
     };
 
     function getSiteConfig(site) {
-        return SITE_CONFIG[site] || SITE_CONFIG['default'];
+        const specific = SITE_CONFIG[site] || {};
+        const defaults = SITE_CONFIG['default'];
+        return { ...defaults, ...specific };
     }
 
     function buildSiteUrl(site, template, username) {
@@ -220,37 +304,27 @@
     const AVATAR_PREFIX = 'av_';
     const AVATAR_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
     const AVATAR_MAX_ENTRIES = 5000;
-    const AVATAR_THUMB_SIZE = 48;
 
-    // Default avatar (UNIT3D profile.png) used when a user has no avatar set
-    const DEFAULT_AVATAR = 'data:image/png;base64,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';
+    // Default avatar: used when a user has no custom avatar set.
+    // Returns the site's own profile.png when possible, falls back to a 1x1 transparent pixel.
+    const AVATAR_FALLBACK = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+    function getDefaultAvatar(site) {
+        return site ? `https://${site}/img/profile.png` : AVATAR_FALLBACK;
+    }
 
     const avatarUrlCache = new Map();
     const avatarInflight = new Map();
 
-    function thumbnailize(blob) {
+    /**
+     * Convert a blob to a data URL.
+     * UNIT3D avatars are already 150×150, so no resizing needed —
+     * the browser handles downscaling via CSS.
+     */
+    function blobToDataUrl(blob) {
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
-            reader.onload = () => {
-                const img = new Image();
-                img.onload = () => {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = AVATAR_THUMB_SIZE;
-                    canvas.height = AVATAR_THUMB_SIZE;
-                    const ctx = canvas.getContext('2d');
-                    const srcSize = Math.min(img.width, img.height);
-                    const sx = (img.width - srcSize) / 2;
-                    const sy = (img.height - srcSize) / 2;
-                    ctx.drawImage(img, sx, sy, srcSize, srcSize, 0, 0, AVATAR_THUMB_SIZE, AVATAR_THUMB_SIZE);
-                    let dataUrl = canvas.toDataURL('image/webp', 0.75);
-                    if (!dataUrl.startsWith('data:image/webp')) {
-                        dataUrl = canvas.toDataURL('image/jpeg', 0.75);
-                    }
-                    resolve(dataUrl);
-                };
-                img.onerror = () => reject(new Error('Thumbnail failed'));
-                img.src = reader.result;
-            };
+            reader.onload = () => resolve(reader.result);
             reader.onerror = () => reject(new Error('FileReader failed'));
             reader.readAsDataURL(blob);
         });
@@ -301,7 +375,8 @@
     }
 
     function getAvatar(site, username) {
-        if (!HAS_GM_XHR) return Promise.resolve(DEFAULT_AVATAR);
+        const fallback = getDefaultAvatar(site);
+        if (!HAS_GM_XHR) return Promise.resolve(fallback);
 
         const cacheKey = `${site}/${username}`;
 
@@ -309,7 +384,7 @@
 
         const cached = readAvatarCache(cacheKey);
         if (cached) {
-            const url = cached.data || DEFAULT_AVATAR;
+            const url = cached.data || fallback;
             avatarUrlCache.set(cacheKey, url);
             return Promise.resolve(url);
         }
@@ -318,7 +393,7 @@
 
         const fetchPromise = new Promise((resolve) => {
             const url = buildSiteUrl(site, getSiteConfig(site).urlAvatar, username);
-            if (!url) { resolve(DEFAULT_AVATAR); return; }
+            if (!url) { resolve(fallback); return; }
 
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -327,26 +402,26 @@
                 onload(response) {
                     avatarInflight.delete(cacheKey);
                     if (response.status >= 200 && response.status < 300 && response.response.size > 0) {
-                        thumbnailize(response.response).then(dataUrl => {
+                        blobToDataUrl(response.response).then(dataUrl => {
                             writeAvatarCache(cacheKey, dataUrl);
                             avatarUrlCache.set(cacheKey, dataUrl);
                             resolve(dataUrl);
                         }).catch(() => {
                             writeAvatarCacheMiss(cacheKey);
-                            avatarUrlCache.set(cacheKey, DEFAULT_AVATAR);
-                            resolve(DEFAULT_AVATAR);
+                            avatarUrlCache.set(cacheKey, fallback);
+                            resolve(fallback);
                         });
                     } else {
                         writeAvatarCacheMiss(cacheKey);
-                        avatarUrlCache.set(cacheKey, DEFAULT_AVATAR);
-                        resolve(DEFAULT_AVATAR);
+                        avatarUrlCache.set(cacheKey, fallback);
+                        resolve(fallback);
                     }
                 },
                 onerror() {
                     avatarInflight.delete(cacheKey);
                     writeAvatarCacheMiss(cacheKey);
-                    avatarUrlCache.set(cacheKey, DEFAULT_AVATAR);
-                    resolve(DEFAULT_AVATAR);
+                    avatarUrlCache.set(cacheKey, fallback);
+                    resolve(fallback);
                 },
             });
         });
@@ -357,12 +432,14 @@
 
     function injectAvatar(fromDiv, avatarUrl) {
         if (!avatarUrl || fromDiv.querySelector('.usb-avatar')) return;
+
         const wrapper = document.createElement('span');
         wrapper.className = 'usb-avatar';
         const img = document.createElement('img');
         img.src = avatarUrl;
         img.alt = '';
         img.loading = 'lazy';
+
         wrapper.appendChild(img);
         fromDiv.insertBefore(wrapper, fromDiv.firstChild);
     }
@@ -391,7 +468,6 @@
         if (CONFIG.USE_GROUP_ICON && meta.iconClasses) {
             const fromDiv = fromSpan.closest('.from');
             if (fromDiv && !fromDiv.querySelector('.usb-group')) {
-                ensureFontAwesome();
                 const icon = document.createElement('i');
                 icon.className = 'usb-group ' + meta.iconClasses;
                 icon.title = meta.rank;
@@ -411,9 +487,9 @@
         }
 
         // Sparkles — CSS background on the .user span
-        if (CONFIG.USE_SPARKLES && meta.isSparkly && site) {
+        if (CONFIG.USE_SPARKLES && meta.sparkleUrl && site) {
             fromSpan.classList.add('usb-sparkles');
-            fromSpan.style.backgroundImage = `url(https://${site}/img/sparkels.gif)`;
+            fromSpan.style.backgroundImage = `url(https://${site}${meta.sparkleUrl})`;
         }
     }
 
@@ -478,20 +554,324 @@
     //  FONTAWESOME ICON SUPPORT
     // =====================================================================
     //
-    // TheLounge bundles FA Solid font but not the full CSS.
-    // We inject the FA 6 Free CDN stylesheet to get all icon classes
-    // working, including brands. This is manager-agnostic (no @require).
+    // Two things are cached permanently in localStorage:
+    //   1. FA Pro woff2 font (base64 data URL, ~200KB)
+    //   2. FA codepoint map (class→unicode, ~30-50KB JSON)
+    //
+    // Font fetch order:
+    //   1. localStorage cache → done if present
+    //   2. Site-specific faFontPath per mapped site
+    //   3. Default faFontPath on remaining mapped sites
+    //   4. FA 6 Free CDN fallback (Free icons only)
+    //
+    // Codepoint discovery:
+    //   1. localStorage cache → done if present
+    //   2. Fetch homepage HTML of each mapped site (in order)
+    //   3. Find <link rel="stylesheet"> tags in head-order
+    //   4. Fetch each CSS, parse .fa-*::before { content } rules
+    //   5. Stop at first CSS with ≥50 FA codepoints, cache the map
+    //   Supports both FA 6 (content: "\fXXX") and FA 7 (--fa: "\fXXX")
+    //
+    // Both caches are permanent — clear via Settings > Maintenance.
 
-    let faLoaded = false;
+    const FA_FONT_KEY = 'fa_font_data';
+    const FA_CODEPOINTS_KEY = 'fa_codepoints';
+    let faInjected = false;
 
-    function ensureFontAwesome() {
-        if (faLoaded) return;
-        faLoaded = true;
-        const link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css';
-        link.crossOrigin = 'anonymous';
-        document.head.appendChild(link);
+    /**
+     * Inject FA styles into the page.
+     * @param {string|null} fontDataUrl  Base64 data URL of Pro font, or null
+     * @param {Object|null} codepoints   Map of icon name → unicode char, or null
+     */
+    function injectFaStyles(fontDataUrl, codepoints) {
+        if (faInjected) return;
+        faInjected = true;
+
+        const style = document.createElement('style');
+        style.id = 'usb-fa-font';
+        let css = '';
+
+        if (fontDataUrl) {
+            css += `
+                @font-face {
+                    font-family: "USB FontAwesome";
+                    font-style: normal;
+                    font-weight: 900;
+                    font-display: swap;
+                    src: url("${fontDataUrl}") format("woff2");
+                }
+                i.usb-group.fas,
+                i.usb-group.fab,
+                i.usb-group.fa,
+                i.usb-group.far,
+                i.usb-group {
+                    font-family: "USB FontAwesome" !important;
+                    font-weight: 900 !important;
+                    font-style: normal;
+                    -webkit-font-smoothing: antialiased;
+                    -moz-osx-font-smoothing: grayscale;
+                    text-rendering: auto;
+                    display: inline-block;
+                    line-height: 1;
+                    font-variant: normal;
+                    color: inherit;
+                }
+            `;
+        } else {
+            css += `
+                .usb-group {
+                    color: inherit;
+                    display: inline-block;
+                    font-style: normal;
+                    line-height: 1;
+                }
+            `;
+        }
+
+        // Inject ::before content rules from our codepoint map
+        if (codepoints) {
+            for (const [name, hex] of Object.entries(codepoints)) {
+                css += `.usb-group.${name}::before{content:"\\${hex}"}\n`;
+            }
+        }
+
+        style.textContent = css;
+        document.head.appendChild(style);
+
+        // If no Pro font AND no codepoints, load FA 6 Free CDN as last resort
+        if (!fontDataUrl && !codepoints) {
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css';
+            link.crossOrigin = 'anonymous';
+            document.head.appendChild(link);
+        }
+    }
+
+    /**
+     * Fetch a URL via GM_xmlhttpRequest as a blob, return base64 data URL.
+     */
+    function gmFetchBlob(url) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                responseType: 'blob',
+                onload(response) {
+                    if (response.status >= 200 && response.status < 300 && response.response.size > 1000) {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(reader.result);
+                        reader.onerror = () => resolve(null);
+                        reader.readAsDataURL(response.response);
+                    } else {
+                        resolve(null);
+                    }
+                },
+                onerror() { resolve(null); },
+            });
+        });
+    }
+
+    /**
+     * Fetch a URL via GM_xmlhttpRequest as text.
+     */
+    function gmFetchText(url) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                onload(response) {
+                    if (response.status >= 200 && response.status < 300) {
+                        resolve(response.responseText);
+                    } else {
+                        resolve(null);
+                    }
+                },
+                onerror() { resolve(null); },
+            });
+        });
+    }
+
+    /**
+     * Parse FA codepoints from a CSS string.
+     * Supports FA 6:  .fa-campfire::before { content: "\f6ba" }
+     * Supports FA 7:  .fa-campfire { --fa: "\f6ba" }
+     * Returns { "fa-campfire": "f6ba", ... } (hex strings) or null if < 50 found.
+     */
+    function parseFaCodepoints(cssText) {
+        const codepoints = {};
+        let count = 0;
+
+        // Helper: extract hex from a content/--fa value (literal unicode or \escape)
+        function extractHex(rawValue) {
+            if (rawValue.startsWith('\\')) {
+                return rawValue.slice(1).toLowerCase();
+            }
+            if (rawValue.length === 1 || rawValue.length === 2) {
+                const cp = rawValue.codePointAt(0);
+                if (cp < 0x80) return null; // Skip ASCII like "@"
+                return cp.toString(16);
+            }
+            return null;
+        }
+
+        // FA 6: Match entire rule blocks with :before/:after selectors
+        // Captures: [selectors] { content: "value" }
+        // Then extracts all .fa-name classes from the selector string
+        const ruleRe = /((?:[^{}]*\.fa-[a-z0-9-]+::?before[^{]*))\{\s*content:\s*"([^"]+)"/g;
+        let m;
+        while ((m = ruleRe.exec(cssText)) !== null) {
+            const hex = extractHex(m[2]);
+            if (!hex) continue;
+
+            // Extract all .fa-name classes from the selector portion
+            const nameRe = /\.(fa-[a-z0-9-]+)/g;
+            let nameMatch;
+            while ((nameMatch = nameRe.exec(m[1])) !== null) {
+                if (!codepoints[nameMatch[1]]) {
+                    codepoints[nameMatch[1]] = hex;
+                    count++;
+                }
+            }
+        }
+
+        // FA 7: .fa-name { --fa: "value" }  (no :before, uses CSS variable)
+        const fa7 = /\.(fa-[a-z0-9-]+)\s*\{\s*--fa:\s*"([^"]+)"/g;
+        while ((m = fa7.exec(cssText)) !== null) {
+            const hex = extractHex(m[2]);
+            if (!hex) continue;
+            if (!codepoints[m[1]]) {
+                codepoints[m[1]] = hex;
+                count++;
+            }
+        }
+
+        // FA Pro has thousands of icons; < 50 means we hit the wrong CSS file
+        return count >= 50 ? codepoints : null;
+    }
+
+    /**
+     * Discover FA codepoints by fetching site CSS files.
+     * Fetches homepage HTML, extracts <link> stylesheet URLs in document order,
+     * and parses each until one yields FA codepoints.
+     */
+    async function discoverFaCodepoints(sites) {
+        for (const site of sites) {
+            const config = getSiteConfig(site);
+            if (config.faFontPath === false) continue;
+
+            console.log(`[USB] Discovering FA codepoints from ${site}...`);
+            const html = await gmFetchText(`https://${site}`);
+            if (!html) continue;
+
+            // Extract all stylesheet URLs in document order
+            const cssUrls = [];
+            const seen = new Set();
+            const linkRe = /<link\b[^>]*>/gi;
+            let tag;
+            while ((tag = linkRe.exec(html)) !== null) {
+                const tagStr = tag[0];
+                if (!/rel=["']stylesheet["']/i.test(tagStr)) continue;
+                const hrefMatch = tagStr.match(/href=["']([^"']+)["']/);
+                if (!hrefMatch) continue;
+                let href = hrefMatch[1];
+                if (href.startsWith('/')) href = `https://${site}${href}`;
+                else if (!href.startsWith('http')) href = `https://${site}/${href}`;
+                if (!seen.has(href)) {
+                    seen.add(href);
+                    cssUrls.push(href);
+                }
+            }
+
+            for (const cssUrl of cssUrls) {
+                const cssText = await gmFetchText(cssUrl);
+                if (!cssText) continue;
+
+                const codepoints = parseFaCodepoints(cssText);
+                if (codepoints) {
+                    const count = Object.keys(codepoints).length;
+                    console.log(`[USB] Cached ${count} FA codepoints from ${cssUrl}`);
+                    storeSet(FA_CODEPOINTS_KEY, codepoints);
+                    return codepoints;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Initialize FA font + codepoint support.
+     */
+    async function ensureFontAwesome() {
+        if (faInjected) return;
+
+        // Collect mapped sites
+        const mappings = loadSiteMappings();
+        const sites = new Set();
+        for (const value of Object.values(mappings)) {
+            if (value && value !== '__none__') sites.add(value);
+        }
+
+        // 1. Check caches
+        const cachedFont = storeGet(FA_FONT_KEY);
+        const cachedCodepoints = storeGet(FA_CODEPOINTS_KEY);
+
+        if (cachedFont?.dataUrl && cachedCodepoints) {
+            injectFaStyles(cachedFont.dataUrl, cachedCodepoints);
+            return;
+        }
+
+        if (!HAS_GM_XHR || sites.size === 0) {
+            injectFaStyles(null, null);
+            return;
+        }
+
+        // 2. Fetch font (if not cached)
+        let fontDataUrl = cachedFont?.dataUrl || null;
+        if (!fontDataUrl) {
+            const defaultPath = SITE_CONFIG['default'].faFontPath;
+            const triedDefaultOn = new Set();
+
+            for (const site of sites) {
+                const config = getSiteConfig(site);
+                if (config.faFontPath === false) continue;
+
+                fontDataUrl = await gmFetchBlob(`https://${site}${config.faFontPath}`);
+                if (fontDataUrl) {
+                    storeSet(FA_FONT_KEY, { dataUrl: fontDataUrl });
+                    console.log(`[USB] Cached FA Pro font from ${site}`);
+                    break;
+                }
+                if (config.faFontPath === defaultPath) triedDefaultOn.add(site);
+            }
+
+            if (!fontDataUrl) {
+                for (const site of sites) {
+                    if (triedDefaultOn.has(site)) continue;
+                    const config = getSiteConfig(site);
+                    if (config.faFontPath === false) continue;
+
+                    fontDataUrl = await gmFetchBlob(`https://${site}${defaultPath}`);
+                    if (fontDataUrl) {
+                        storeSet(FA_FONT_KEY, { dataUrl: fontDataUrl });
+                        console.log(`[USB] Cached FA Pro font from ${site} (default path)`);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 3. Discover codepoints (if not cached)
+        let codepoints = cachedCodepoints || null;
+        if (!codepoints) {
+            codepoints = await discoverFaCodepoints(sites);
+        }
+
+        // 4. Inject whatever we got
+        if (!fontDataUrl && !codepoints) {
+            console.log('[USB] FA Pro not found, using FA Free CDN');
+        }
+        injectFaStyles(fontDataUrl, codepoints);
     }
     // =====================================================================
     //
@@ -524,27 +904,28 @@
     }
 
     /**
-     * Parse the online users widget from a full page HTML string.
-     * Returns a Map of username → { rank, rankColor, iconClasses, hasCustomIcon, isSparkly }
+     * Parse ALL user-tag links from a full page HTML string.
+     * Scans the entire page (online widget, forum posts, uploads, etc.)
+     * for user-tag__link anchors and extracts metadata.
+     * Returns a Map of username → { rank, rankColor, iconClasses, hasCustomIcon, sparkleUrl }
      */
-    function parseOnlineUsersWidget(html) {
+    function parsePageUsers(html) {
         const users = new Map();
 
-        // Check widget exists (case-insensitive)
-        if (!/users\s+online/i.test(html)) return users;
-
-        // Parse user-tag__link anchors
+        // Parse ALL user-tag__link anchors across the entire page
         const userPattern = /<a\s+class="user-tag__link(?:\s+user-tag__link--anonymous)?\s+(fa[^"]*?)"\s+href="https?:\/\/[^/]+\/users\/([^"]+)"\s+style="color:\s*([^"]*?)"\s+title="([^"]*?)"/g;
         let match;
         while ((match = userPattern.exec(html)) !== null) {
             const [, iconClasses, username, color, rank] = match;
+            // Skip (Anonymous) placeholder users
+            if (username === '(Anonymous)' || username === 'Anonymous') continue;
             if (!users.has(username)) {
                 users.set(username, {
                     rank,
                     rankColor: color.trim(),
                     iconClasses: iconClasses.trim(),
                     hasCustomIcon: false,
-                    isSparkly: false,
+                    sparkleUrl: null,
                 });
             }
         }
@@ -557,26 +938,24 @@
             if (data) data.hasCustomIcon = true;
         }
 
-        // Cross-reference sparkly (donor) backgrounds
-        // The sparkle background is on the parent span, so we look for it before the <a>
-        const sparklePattern = /background-image:\s*url\(\/img\/sparkels\.gif\);[^<]*?(?:<[^a]*?)*?<a[^>]*?\/users\/([^"]+)"/g;
+        // Cross-reference sparkle/donor backgrounds
+        // Captures the actual image path (sparkels.gif, space.gif, etc.)
+        const sparklePattern = /background-image:\s*url\((\/img\/[^)]+)\);[^<]*?(?:<[^a]*?)*?<a[^>]*?\/users\/([^"]+)"/g;
         let sparkleMatch;
         while ((sparkleMatch = sparklePattern.exec(html)) !== null) {
-            const data = users.get(sparkleMatch[1]);
-            if (data) data.isSparkly = true;
+            const data = users.get(sparkleMatch[2]);
+            if (data) data.sparkleUrl = sparkleMatch[1];
         }
 
         return users;
     }
 
     /**
-     * Scrape online users from a tracker site and cache the results.
+     * Scrape user metadata from a tracker site's homepage and cache the results.
+     * Parses ALL user-tags across the entire page (online widget, forum posts, etc.)
      */
-    function scrapeOnlineUsers(site) {
+    function scrapeSiteUsers(site) {
         if (!HAS_GM_XHR) return Promise.resolve(0);
-
-        const config = getSiteConfig(site);
-        if (!config.featOnlineWidget) return Promise.resolve(0);
 
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
@@ -589,7 +968,7 @@
                         resolve(0);
                         return;
                     }
-                    const users = parseOnlineUsersWidget(response.responseText);
+                    const users = parsePageUsers(response.responseText);
                     let count = 0;
                     for (const [username, data] of users) {
                         writeUserMeta(site, username, data);
@@ -652,12 +1031,14 @@
                         return;
                     }
 
+                    const sparkleUrlMatch = html.match(/background-image:\s*url\((\/img\/[^)]+)\)/i);
+
                     const data = {
                         rank: match[3],
                         rankColor: match[2].trim(),
                         iconClasses: match[1].trim(),
                         hasCustomIcon: /authenticated-images\/user-icons\//i.test(html),
-                        isSparkly: /background-image:\s*url\(\/img\/sparkels\.gif\)/i.test(html),
+                        sparkleUrl: sparkleUrlMatch ? sparkleUrlMatch[1] : null,
                     };
 
                     writeUserMeta(site, username, data);
@@ -670,7 +1051,7 @@
 
     /**
      * Get user metadata: check cache first, then optionally fetch from profile.
-     * Returns { rank, rankColor, iconClasses, hasCustomIcon, isSparkly } or null.
+     * Returns { rank, rankColor, iconClasses, hasCustomIcon, sparkleUrl } or null.
      */
     function getUserMeta(site, username, fetchOnMiss = true) {
         const cached = readUserMeta(site, username);
@@ -684,15 +1065,13 @@
      */
     function startScrapeSchedule(site) {
         if (scrapeTimers.has(site)) return;
-        // Initial scrape
-        scrapeOnlineUsers(site);
-        // Repeat every SCRAPE_INTERVAL
-        const timer = setInterval(() => scrapeOnlineUsers(site), SCRAPE_INTERVAL);
+        scrapeSiteUsers(site);
+        const timer = setInterval(() => scrapeSiteUsers(site), SCRAPE_INTERVAL);
         scrapeTimers.set(site, timer);
     }
 
     /**
-     * Start scraping for all mapped sites.
+     * Start scraping for all mapped sites (network or channel level).
      */
     async function initializeMetadataScraping() {
         const mappings = loadSiteMappings();
@@ -704,18 +1083,14 @@
         // Run initial scrapes and wait for them to complete
         const initialScrapes = [];
         for (const site of sites) {
-            const config = getSiteConfig(site);
-            if (config.featOnlineWidget) {
-                initialScrapes.push(scrapeOnlineUsers(site));
-            }
+            initialScrapes.push(scrapeSiteUsers(site));
         }
         await Promise.all(initialScrapes);
 
         // Then start periodic scraping
         for (const site of sites) {
-            const config = getSiteConfig(site);
-            if (config.featOnlineWidget && !scrapeTimers.has(site)) {
-                const timer = setInterval(() => scrapeOnlineUsers(site), SCRAPE_INTERVAL);
+            if (!scrapeTimers.has(site)) {
+                const timer = setInterval(() => scrapeSiteUsers(site), SCRAPE_INTERVAL);
                 scrapeTimers.set(site, timer);
             }
         }
@@ -1012,7 +1387,7 @@
             e.preventDefault();
             toggleSettingsModal();
         });
-
+        
         // Insert before the last child (Help)
         const helpSpan = footer.lastElementChild;
         footer.insertBefore(wrapper, helpSpan);
@@ -1240,6 +1615,28 @@
         clearCacheBtn.addEventListener('click', () => { clearAvatarCache(); showToast('Avatar cache cleared'); });
         maintRow.appendChild(clearCacheBtn);
 
+        const clearMetaBtn = document.createElement('button');
+        clearMetaBtn.className = 'btn';
+        clearMetaBtn.textContent = 'Clear metadata cache';
+        clearMetaBtn.addEventListener('click', () => {
+            for (const key of storeKeys(META_PREFIX)) storeDelete(key);
+            showToast('Metadata cache cleared — will repopulate on next scrape');
+        });
+        maintRow.appendChild(clearMetaBtn);
+
+        const clearFontBtn = document.createElement('button');
+        clearFontBtn.className = 'btn';
+        clearFontBtn.textContent = 'Clear font cache';
+        clearFontBtn.addEventListener('click', () => {
+            storeDelete(FA_FONT_KEY);
+            storeDelete(FA_CODEPOINTS_KEY);
+            faInjected = false;
+            const existingStyle = document.querySelector('#usb-fa-font');
+            if (existingStyle) existingStyle.remove();
+            showToast('Font + codepoint cache cleared — refresh to re-fetch');
+        });
+        maintRow.appendChild(clearFontBtn);
+
         const resetBtn = document.createElement('button');
         resetBtn.className = 'btn';
         resetBtn.textContent = 'Reset all settings';
@@ -1341,30 +1738,34 @@
         style.textContent = `
             .usb-avatar {
                 display: inline-block;
-                vertical-align: middle;
+                /*vertical-align: middle;*/
                 margin-right: 4px;
+                width: 20px;
+                height: 20px;
+                flex-shrink: 0;
             }
             .usb-avatar img {
                 width: 20px;
                 height: 20px;
                 border-radius: 50%;
                 object-fit: cover;
-                vertical-align: middle;
+                /*vertical-align: middle;*/
+                display: block;
             }
             .usb-group {
-                vertical-align: middle;
+                /*vertical-align: middle;*/
                 margin-right: 3px;
             }
             .usb-icon {
                 display: inline-block;
-                vertical-align: middle;
+                /*vertical-align: middle;*/
                 margin-left: 3px;
             }
             .usb-icon img {
-                width: 16px;
+                /*width: 16px;*/
                 height: 16px;
                 object-fit: cover;
-                vertical-align: middle;
+                /*vertical-align: middle;*/
             }
             .usb-sparkles {
                 background-repeat: repeat;
@@ -1374,6 +1775,9 @@
             }
             .usb-unit3d-colors {
                 color: var(--usb-unit3d-color) !important;
+            }
+            .usb-settings-btn button::before {
+                content: '\\f4d8' !important;
             }
         `;
         document.head.appendChild(style);
@@ -1461,8 +1865,18 @@
         if (CONFIG.USE_AVATARS && mappedSite) {
             const fromDiv = messageElement.querySelector('.from');
             if (fromDiv && !fromDiv.querySelector('.usb-avatar')) {
+                // Insert placeholder immediately to reserve space (prevents layout shift)
+                const wrapper = document.createElement('span');
+                wrapper.className = 'usb-avatar';
+                const img = document.createElement('img');
+                img.alt = '';
+                img.loading = 'lazy';
+                wrapper.appendChild(img);
+                fromDiv.insertBefore(wrapper, fromDiv.firstChild);
+
+                // Fill in the actual avatar URL async
                 getAvatar(mappedSite, resolvedUsername).then(avatarUrl => {
-                    injectAvatar(fromDiv, avatarUrl);
+                    if (avatarUrl) img.src = avatarUrl;
                 });
             }
         }
@@ -1470,9 +1884,8 @@
         // --- UNIT3D metadata injection (group icon, sparkles, custom icon) ---
         if (mappedSite && (CONFIG.USE_GROUP_ICON || CONFIG.USE_SPARKLES || CONFIG.USE_CUSTOM_ICON || CONFIG.USE_GROUP_COLORS)) {
             if (!fromSpan.hasAttribute('data-usb-group')) {
-                // Don't trigger profile fetches from message processing — rely on periodic scrape.
-                // Profile fetches are only triggered by explicit "Refresh user data" context menu.
-                getUserMeta(mappedSite, resolvedUsername, false).then(meta => {
+                // Allow profile fetch for cache misses (rate-limited by PROFILE_MISS_LIMIT)
+                getUserMeta(mappedSite, resolvedUsername, true).then(meta => {
                     if (!meta) return;
                     injectUserMeta(fromSpan, mappedSite, meta);
 
@@ -1498,8 +1911,11 @@
 
     function initializeContextMenuHooks() {
         const captureTarget = (e) => {
+            // Capture sidebar items for network/channel context menus
+            const sidebarItem = e.target.closest('.channel-list-item, .network');
+            // Capture user spans for user context menus
             const userSpan = e.target.closest('.from .user, .user');
-            lastContextTarget = userSpan || null;
+            lastContextTarget = sidebarItem || userSpan || e.target;
         };
         document.addEventListener('click', captureTarget, true);
         document.addEventListener('contextmenu', captureTarget, true);
@@ -1514,6 +1930,42 @@
     }
 
     function modifyContextMenu(menu) {
+        // Detect menu type
+        const isUserMenu = !!menu.querySelector('.context-menu-user');
+        const isNetworkMenu = !!menu.querySelector('.context-menu-network');
+        const isChannelMenu = !!menu.querySelector('.context-menu-chan');
+
+        if (isUserMenu) modifyUserContextMenu(menu);
+        if (isNetworkMenu) modifyNetworkContextMenu(menu);
+        if (isChannelMenu) modifyChannelContextMenu(menu);
+    }
+
+    function closeContextMenu(menu) {
+        const mc = document.querySelector('#context-menu-container');
+        if (mc) mc.classList.remove('open');
+        menu.remove();
+    }
+
+    function makeContextMenuItem(label, onClick) {
+        const item = document.createElement('li');
+        item.className = 'context-menu-item usb-context-item';
+        item.setAttribute('role', 'menuitem');
+        item.textContent = label;
+        item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            onClick(e);
+        });
+        return item;
+    }
+
+    function makeContextDivider() {
+        const divider = document.createElement('li');
+        divider.className = 'context-menu-divider usb-context-item';
+        divider.setAttribute('role', 'menuitem');
+        return divider;
+    }
+
+    function modifyUserContextMenu(menu) {
         if (!lastContextTarget) return;
 
         const context = getActiveNetworkAndChannel();
@@ -1537,34 +1989,18 @@
             if (firstItem) firstItem.textContent = displayUsername;
         }
 
-        // Only add USB context items if a site is mapped
         if (!mappedSite) return;
 
         const siteConfig = getSiteConfig(mappedSite);
 
-        const divider = document.createElement('li');
-        divider.className = 'context-menu-divider usb-context-item';
-        divider.setAttribute('role', 'menuitem');
-        menu.appendChild(divider);
+        menu.appendChild(makeContextDivider());
 
-        // "Refresh user data" — invalidates avatar + metadata, re-fetches from profile
-        const refreshItem = document.createElement('li');
-        refreshItem.className = 'context-menu-item usb-context-item';
-        refreshItem.setAttribute('role', 'menuitem');
-        refreshItem.textContent = 'Refresh user data';
-        refreshItem.addEventListener('click', (e) => {
-            e.stopPropagation();
-
-            // Invalidate avatar cache
+        // "Refresh user data"
+        menu.appendChild(makeContextMenuItem('Refresh user data', () => {
             invalidateAvatar(mappedSite, displayUsername);
-
-            // Invalidate metadata cache
             storeDelete(META_PREFIX + mappedSite + '/' + displayUsername);
-
-            // Invalidate custom icon cache
             customIconCache.delete(`${mappedSite}/${displayUsername}`);
 
-            // Re-fetch avatar
             getAvatar(mappedSite, displayUsername).then(avatarUrl => {
                 document.querySelectorAll('.from').forEach(fromDiv => {
                     const userSpan = fromDiv.querySelector('.user');
@@ -1577,18 +2013,21 @@
                 });
             });
 
-            // Re-fetch metadata from profile page
+            // Bypass rate limit for manual refresh
+            const savedMissCount = profileMissCount;
+            profileMissCount = 0;
             scrapeUserProfile(mappedSite, displayUsername).then(meta => {
+                profileMissCount = savedMissCount;
                 if (!meta) return;
                 document.querySelectorAll('.from .user').forEach(userSpan => {
                     const name = userSpan.getAttribute('data-name') || stripIrcPrefix(userSpan.textContent.replace(/[()]/g, '').trim());
                     if (name !== displayUsername) return;
-                    // Clear existing injected elements
                     userSpan.querySelectorAll('.usb-group, .usb-icon').forEach(el => el.remove());
+                    const fromDiv = userSpan.closest('.from');
+                    if (fromDiv) fromDiv.querySelectorAll('.usb-group').forEach(el => el.remove());
                     userSpan.removeAttribute('data-usb-group');
                     userSpan.classList.remove('usb-sparkles', 'usb-unit3d-colors');
                     userSpan.style.removeProperty('background-image');
-                    // Re-inject
                     injectUserMeta(userSpan, mappedSite, meta);
                     if (CONFIG.USE_CUSTOM_ICON && meta.hasCustomIcon && siteConfig.urlIcon && siteConfig.featCustomIcon) {
                         fetchCustomIcon(mappedSite, displayUsername).then(dataUrl => {
@@ -1599,28 +2038,105 @@
                 showToast(`Refreshed data for ${displayUsername}`);
             });
 
-            const mc = document.querySelector('#context-menu-container');
-            if (mc) mc.classList.remove('open');
-            menu.remove();
-        });
-        menu.appendChild(refreshItem);
+            closeContextMenu(menu);
+        }));
 
-        // "Tracker profile" — link to user's profile on the tracker
+        // "Tracker profile"
         if (siteConfig.featProfile && siteConfig.urlProfile) {
-            const profileItem = document.createElement('li');
-            profileItem.className = 'context-menu-item usb-context-item';
-            profileItem.setAttribute('role', 'menuitem');
-            profileItem.textContent = 'Tracker profile';
-            profileItem.addEventListener('click', (e) => {
-                e.stopPropagation();
+            menu.appendChild(makeContextMenuItem('Tracker profile', () => {
                 const profileUrl = buildSiteUrl(mappedSite, siteConfig.urlProfile, displayUsername);
                 if (profileUrl) window.open(profileUrl, '_blank');
-                const mc = document.querySelector('#context-menu-container');
-                if (mc) mc.classList.remove('open');
-                menu.remove();
-            });
-            menu.appendChild(profileItem);
+                closeContextMenu(menu);
+            }));
         }
+    }
+
+    /**
+     * Refresh data for all sites mapped to channels under this network.
+     */
+    function modifyNetworkContextMenu(menu) {
+        const networkEl = lastContextTarget?.closest?.('.network');
+        const lobby = networkEl?.querySelector('.channel-list-item[data-type="lobby"]');
+        const networkName = lobby?.getAttribute('data-name') || null;
+        if (!networkName) return;
+
+        const mappings = loadSiteMappings();
+        const sites = new Set();
+        for (const [key, value] of Object.entries(mappings)) {
+            if (!value || value === '__none__') continue;
+            if (key === networkName) sites.add(value);
+            if (key.startsWith(networkName + '/')) sites.add(value);
+        }
+
+        if (sites.size === 0) return;
+
+        menu.appendChild(makeContextDivider());
+
+        // Additive re-scrape (keeps existing cache, adds new data)
+        menu.appendChild(makeContextMenuItem('Refresh tracker data', () => {
+            const promises = [];
+            for (const site of sites) promises.push(scrapeSiteUsers(site));
+            Promise.all(promises).then(counts => {
+                const total = counts.reduce((a, b) => a + b, 0);
+                showToast(`Refreshed ${total} users across ${sites.size} site(s)`);
+                processExistingMessages();
+            });
+            closeContextMenu(menu);
+        }));
+
+        // Destructive: wipe cache then re-scrape
+        menu.appendChild(makeContextMenuItem('Clear & refresh tracker data', () => {
+            for (const site of sites) {
+                for (const key of storeKeys(META_PREFIX + site + '/')) storeDelete(key);
+            }
+            const promises = [];
+            for (const site of sites) promises.push(scrapeSiteUsers(site));
+            Promise.all(promises).then(counts => {
+                const total = counts.reduce((a, b) => a + b, 0);
+                showToast(`Cleared & refreshed ${total} users across ${sites.size} site(s)`);
+                processExistingMessages();
+            });
+            closeContextMenu(menu);
+        }));
+    }
+
+    /**
+     * Refresh data for the site mapped to this specific channel.
+     */
+    function modifyChannelContextMenu(menu) {
+        const channelItem = menu.querySelector('.context-menu-chan');
+        if (!channelItem) return;
+        const channelName = channelItem.textContent.trim();
+        if (!channelName) return;
+
+        const networkEl = lastContextTarget?.closest?.('.network');
+        const lobby = networkEl?.querySelector('.channel-list-item[data-type="lobby"]');
+        const networkName = lobby?.getAttribute('data-name') || null;
+        if (!networkName) return;
+
+        const mappedSite = resolveSiteForContext(networkName, channelName);
+        if (!mappedSite) return;
+
+        menu.appendChild(makeContextDivider());
+
+        // Additive re-scrape
+        menu.appendChild(makeContextMenuItem(`Refresh tracker data (${mappedSite})`, () => {
+            scrapeSiteUsers(mappedSite).then(count => {
+                showToast(`Refreshed ${count} users from ${mappedSite}`);
+                processExistingMessages();
+            });
+            closeContextMenu(menu);
+        }));
+
+        // Destructive: wipe cache then re-scrape
+        menu.appendChild(makeContextMenuItem(`Clear & refresh (${mappedSite})`, () => {
+            for (const key of storeKeys(META_PREFIX + mappedSite + '/')) storeDelete(key);
+            scrapeSiteUsers(mappedSite).then(count => {
+                showToast(`Cleared & refreshed ${count} users from ${mappedSite}`);
+                processExistingMessages();
+            });
+            closeContextMenu(menu);
+        }));
     }
 
     // =====================================================================
@@ -1685,10 +2201,13 @@
         tryInjectFooterButton();
         initializeContextMenuHooks();
 
-        // Start metadata scraping first, wait for initial scrape to populate cache
-        await initializeMetadataScraping();
+        // Load FA font and metadata in parallel, wait for both before processing messages
+        await Promise.all([
+            ensureFontAwesome(),
+            initializeMetadataScraping(),
+        ]);
 
-        // Now process messages (metadata cache is warm)
+        // Now process messages (font + metadata cache are warm)
         initializeObserver();
     }
 
