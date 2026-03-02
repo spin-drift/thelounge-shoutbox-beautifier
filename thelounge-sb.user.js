@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      3.0-dev0.4
+// @version      3.0-dev0.5
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://irc.badkitty.zone/*
@@ -164,7 +164,9 @@
 
     function storeSet(key, value) {
         try { localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value)); }
-        catch { /* quota exceeded, silently fail */ }
+        catch (e) {
+            console.warn(`[USB] localStorage write failed for ${key}:`, e.name);
+        }
     }
 
     function storeDelete(key) {
@@ -179,6 +181,69 @@
             if (k.startsWith(full)) keys.push(k.slice(STORE_PREFIX.length));
         }
         return keys;
+    }
+
+    // =====================================================================
+    //  INDEXEDDB (for avatar blobs — no quota concerns)
+    // =====================================================================
+
+    const IDB_NAME = 'usb_cache';
+    const IDB_VERSION = 1;
+    const IDB_STORE = 'avatars';
+    let idb = null;
+
+    function openIdb() {
+        if (idb) return Promise.resolve(idb);
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains(IDB_STORE)) {
+                    db.createObjectStore(IDB_STORE);
+                }
+            };
+            req.onsuccess = () => { idb = req.result; resolve(idb); };
+            req.onerror = () => {
+                console.warn('[USB] IndexedDB open failed, falling back to in-memory only');
+                reject(req.error);
+            };
+        });
+    }
+
+    function idbGet(key) {
+        return openIdb().then(db => new Promise((resolve) => {
+            const tx = db.transaction(IDB_STORE, 'readonly');
+            const req = tx.objectStore(IDB_STORE).get(key);
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => resolve(null);
+        })).catch(() => null);
+    }
+
+    function idbSet(key, value) {
+        return openIdb().then(db => new Promise((resolve) => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).put(value, key);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+        })).catch(() => false);
+    }
+
+    function idbDelete(key) {
+        return openIdb().then(db => new Promise((resolve) => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).delete(key);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+        })).catch(() => false);
+    }
+
+    function idbClear() {
+        return openIdb().then(db => new Promise((resolve) => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).clear();
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => resolve(false);
+        })).catch(() => false);
     }
 
     // =====================================================================
@@ -301,9 +366,8 @@
     //  AVATAR CACHE & FETCHING
     // =====================================================================
 
-    const AVATAR_PREFIX = 'av_';
+    const AVATAR_PREFIX = 'av/';
     const AVATAR_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
-    const AVATAR_MAX_ENTRIES = 5000;
 
     // Default avatar: used when a user has no custom avatar set.
     // Returns the site's own profile.png when possible, falls back to a 1x1 transparent pixel.
@@ -317,9 +381,8 @@
     const avatarInflight = new Map();
 
     /**
-     * Convert a blob to a data URL.
-     * UNIT3D avatars are already 150×150, so no resizing needed —
-     * the browser handles downscaling via CSS.
+     * Convert a blob to a data URL for use as img.src.
+     * No resizing — IndexedDB has no meaningful quota limits.
      */
     function blobToDataUrl(blob) {
         return new Promise((resolve, reject) => {
@@ -331,47 +394,37 @@
     }
 
     function readAvatarCache(cacheKey) {
-        const entry = storeGet(AVATAR_PREFIX + cacheKey);
-        if (!entry || !entry.fetchedAt) return null;
-        if ((Date.now() - entry.fetchedAt) > AVATAR_TTL) {
-            storeDelete(AVATAR_PREFIX + cacheKey);
-            return null;
-        }
-        return entry;
+        return idbGet(AVATAR_PREFIX + cacheKey).then(entry => {
+            if (!entry || !entry.fetchedAt) return null;
+            if ((Date.now() - entry.fetchedAt) > AVATAR_TTL) {
+                idbDelete(AVATAR_PREFIX + cacheKey);
+                return null;
+            }
+            return entry;
+        });
     }
 
     function writeAvatarCache(cacheKey, dataUrl) {
-        storeSet(AVATAR_PREFIX + cacheKey, { data: dataUrl, fetchedAt: Date.now() });
-        evictAvatarCacheIfNeeded();
+        return idbSet(AVATAR_PREFIX + cacheKey, { data: dataUrl, fetchedAt: Date.now() });
     }
 
     function writeAvatarCacheMiss(cacheKey) {
-        storeSet(AVATAR_PREFIX + cacheKey, { data: null, fetchedAt: Date.now() });
-    }
-
-    function evictAvatarCacheIfNeeded() {
-        const allKeys = storeKeys(AVATAR_PREFIX);
-        if (allKeys.length <= AVATAR_MAX_ENTRIES) return;
-        const entries = allKeys.map(key => {
-            const entry = storeGet(key);
-            return { key, fetchedAt: entry?.fetchedAt || 0 };
-        });
-        entries.sort((a, b) => a.fetchedAt - b.fetchedAt);
-        const toDelete = entries.length - AVATAR_MAX_ENTRIES;
-        for (let i = 0; i < toDelete; i++) storeDelete(entries[i].key);
+        return idbSet(AVATAR_PREFIX + cacheKey, { data: null, fetchedAt: Date.now() });
     }
 
     function invalidateAvatar(site, username) {
         const cacheKey = `${site}/${username}`;
-        storeDelete(AVATAR_PREFIX + cacheKey);
+        idbDelete(AVATAR_PREFIX + cacheKey);
         avatarUrlCache.delete(cacheKey);
         avatarInflight.delete(cacheKey);
     }
 
     function clearAvatarCache() {
-        for (const key of storeKeys(AVATAR_PREFIX)) storeDelete(key);
+        idbClear();
         avatarUrlCache.clear();
         avatarInflight.clear();
+        // Also clean up any legacy localStorage avatar entries
+        for (const key of storeKeys('av_')) storeDelete(key);
     }
 
     function getAvatar(site, username) {
@@ -382,47 +435,48 @@
 
         if (avatarUrlCache.has(cacheKey)) return Promise.resolve(avatarUrlCache.get(cacheKey));
 
-        const cached = readAvatarCache(cacheKey);
-        if (cached) {
-            const url = cached.data || fallback;
-            avatarUrlCache.set(cacheKey, url);
-            return Promise.resolve(url);
-        }
-
         if (avatarInflight.has(cacheKey)) return avatarInflight.get(cacheKey);
 
-        const fetchPromise = new Promise((resolve) => {
-            const url = buildSiteUrl(site, getSiteConfig(site).urlAvatar, username);
-            if (!url) { resolve(fallback); return; }
+        const fetchPromise = readAvatarCache(cacheKey).then(cached => {
+            if (cached) {
+                const url = cached.data || fallback;
+                avatarUrlCache.set(cacheKey, url);
+                return url;
+            }
 
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url,
-                responseType: 'blob',
-                onload(response) {
-                    avatarInflight.delete(cacheKey);
-                    if (response.status >= 200 && response.status < 300 && response.response.size > 0) {
-                        blobToDataUrl(response.response).then(dataUrl => {
-                            writeAvatarCache(cacheKey, dataUrl);
-                            avatarUrlCache.set(cacheKey, dataUrl);
-                            resolve(dataUrl);
-                        }).catch(() => {
+            return new Promise((resolve) => {
+                const url = buildSiteUrl(site, getSiteConfig(site).urlAvatar, username);
+                if (!url) { resolve(fallback); return; }
+
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url,
+                    responseType: 'blob',
+                    onload(response) {
+                        avatarInflight.delete(cacheKey);
+                        if (response.status >= 200 && response.status < 300 && response.response.size > 0) {
+                            blobToDataUrl(response.response).then(dataUrl => {
+                                writeAvatarCache(cacheKey, dataUrl);
+                                avatarUrlCache.set(cacheKey, dataUrl);
+                                resolve(dataUrl);
+                            }).catch(() => {
+                                writeAvatarCacheMiss(cacheKey);
+                                avatarUrlCache.set(cacheKey, fallback);
+                                resolve(fallback);
+                            });
+                        } else {
                             writeAvatarCacheMiss(cacheKey);
                             avatarUrlCache.set(cacheKey, fallback);
                             resolve(fallback);
-                        });
-                    } else {
+                        }
+                    },
+                    onerror() {
+                        avatarInflight.delete(cacheKey);
                         writeAvatarCacheMiss(cacheKey);
                         avatarUrlCache.set(cacheKey, fallback);
                         resolve(fallback);
-                    }
-                },
-                onerror() {
-                    avatarInflight.delete(cacheKey);
-                    writeAvatarCacheMiss(cacheKey);
-                    avatarUrlCache.set(cacheKey, fallback);
-                    resolve(fallback);
-                },
+                    },
+                });
             });
         });
 
@@ -992,18 +1046,20 @@
      * Fetch metadata for a single user from their profile page.
      * Used as a fallback when the user isn't in the online widget cache.
      */
-    function scrapeUserProfile(site, username) {
+    function scrapeUserProfile(site, username, bypassLimit = false) {
         if (!HAS_GM_XHR) return Promise.resolve(null);
 
         const config = getSiteConfig(site);
         if (!config.featProfile || !config.urlProfile) return Promise.resolve(null);
 
-        // Rate-limit consecutive profile fetches
-        if (profileMissCount >= PROFILE_MISS_LIMIT) {
-            console.warn(`[USB] Profile fetch limit reached (${PROFILE_MISS_LIMIT}), skipping ${username}`);
-            return Promise.resolve(null);
+        // Rate-limit consecutive profile fetches (unless explicitly bypassed)
+        if (!bypassLimit) {
+            if (profileMissCount >= PROFILE_MISS_LIMIT) {
+                console.warn(`[USB] Profile fetch limit reached (${PROFILE_MISS_LIMIT}), skipping ${username}`);
+                return Promise.resolve(null);
+            }
+            profileMissCount++;
         }
-        profileMissCount++;
 
         const url = buildSiteUrl(site, config.urlProfile, username);
         if (!url) return Promise.resolve(null);
@@ -1387,7 +1443,7 @@
             e.preventDefault();
             toggleSettingsModal();
         });
-        
+
         // Insert before the last child (Help)
         const helpSpan = footer.lastElementChild;
         footer.insertBefore(wrapper, helpSpan);
@@ -1738,7 +1794,7 @@
         style.textContent = `
             .usb-avatar {
                 display: inline-block;
-                /*vertical-align: middle;*/
+                vertical-align: middle;
                 margin-right: 4px;
                 width: 20px;
                 height: 20px;
@@ -1749,23 +1805,22 @@
                 height: 20px;
                 border-radius: 50%;
                 object-fit: cover;
-                /*vertical-align: middle;*/
+                vertical-align: middle;
                 display: block;
             }
             .usb-group {
-                /*vertical-align: middle;*/
+                vertical-align: middle;
                 margin-right: 3px;
             }
             .usb-icon {
                 display: inline-block;
-                /*vertical-align: middle;*/
+                vertical-align: middle;
                 margin-left: 3px;
             }
             .usb-icon img {
-                /*width: 16px;*/
                 height: 16px;
                 object-fit: cover;
-                /*vertical-align: middle;*/
+                vertical-align: middle;
             }
             .usb-sparkles {
                 background-repeat: repeat;
@@ -1775,9 +1830,6 @@
             }
             .usb-unit3d-colors {
                 color: var(--usb-unit3d-color) !important;
-            }
-            .usb-settings-btn button::before {
-                content: '\\f4d8' !important;
             }
         `;
         document.head.appendChild(style);
@@ -1998,7 +2050,6 @@
         // "Refresh user data"
         menu.appendChild(makeContextMenuItem('Refresh user data', () => {
             invalidateAvatar(mappedSite, displayUsername);
-            storeDelete(META_PREFIX + mappedSite + '/' + displayUsername);
             customIconCache.delete(`${mappedSite}/${displayUsername}`);
 
             getAvatar(mappedSite, displayUsername).then(avatarUrl => {
@@ -2014,10 +2065,7 @@
             });
 
             // Bypass rate limit for manual refresh
-            const savedMissCount = profileMissCount;
-            profileMissCount = 0;
-            scrapeUserProfile(mappedSite, displayUsername).then(meta => {
-                profileMissCount = savedMissCount;
+            scrapeUserProfile(mappedSite, displayUsername, true).then(meta => {
                 if (!meta) return;
                 document.querySelectorAll('.from .user').forEach(userSpan => {
                     const name = userSpan.getAttribute('data-name') || stripIrcPrefix(userSpan.textContent.replace(/[()]/g, '').trim());
@@ -2195,6 +2243,9 @@
     async function main() {
         const isLounge = await waitForTheLounge();
         if (!isLounge) return;
+
+        // Open IndexedDB early (avatar cache lives here)
+        openIdb().catch(() => {});
 
         injectDefaultStyles();
         initializeRouterMonitor();
