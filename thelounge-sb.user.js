@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      3.0-dev0.5
+// @version      3.0-dev0.6
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://irc.badkitty.zone/*
@@ -18,18 +18,6 @@
 // @grant        GM_xmlhttpRequest
 // @run-at       document-start
 // ==/UserScript==
-
-// This is a reworked version of the original script that adds:
-// - Handler architecture: Makes it easier to add new formats
-// - Custom decorators: Set a prefix/suffix for bridged usernames
-// - DOM metadata: Completely customize appearance with TheLounge theme CSS
-// - Regex matcher support: Pair with custom handlers to do almost anything
-// - Preview support: Surgical DOM modification preserves link previews and event listeners
-// - More handlers: BHD, extensive HUNO support
-// - Nick coloring: Bridged usernames get proper TheLounge colors instead of inheriting bot colors
-// - Settings UI: Floating modal, decoupled from TheLounge's settings
-// - Site mappings: Associate networks/channels with tracker sites for avatar resolution
-// - Avatar support: Fetches and caches authenticated user avatars from UNIT3D sites
 
 // CREDITS:
 // fulcrum: Original script (https://aither.cc/forums/topics/3874)
@@ -57,8 +45,15 @@
 // - 2.5 - (spindrift) Add ANT support (thanks JCDenton for initial work)
 // - 2.6 - (FortKnox1337) Add RFX support, enable DP and HHD support, fix ANT/BHD support
 // - 2.7 - (cmd430) Enable OE+ support, fix config indents, fix non-chat page breakage
-// - 3.0 - (spindrift) Avatars, site mappings, floating settings modal, localStorage,
-//          data-usb-* attributes, no userscript manager required for core features
+// - 3.0 - (spindrift) Avatars, site mappings, floating settings modal, data-usb-*
+//         attributes, no userscript manager required for core features
+//       - (spindrift) UNIT3D metadata integration: group icons, sparkles, custom icons,
+//          group colors, FontAwesome Pro font/codepoint discovery, metadata scraping,
+//          context menu hooks (refresh user data, tracker profile link)
+//       - (spindrift) Avatar cache moved to IndexedDB (no more localStorage quota issues),
+//          network/channel context menus (refresh/clear tracker data), layout shift fix
+//          via synchronous placeholder injection, profile fetch rate limit bypass for
+//          manual refresh, page-wide user-tag parsing, code cleanup
 
 // CSS STYLING:
 // Custom CSS can be added in TheLounge > Settings > Appearance.
@@ -86,14 +81,139 @@
 (function () {
     'use strict';
 
-    // =====================================================================
-    //  CAPABILITY DETECTION
-    // =====================================================================
-
-    const HAS_GM_XHR = typeof GM_xmlhttpRequest !== 'undefined';
+    // ---- START OF COMMUNITY MAINTENANCE ZONE - EDIT BELOW TO CUSTOMIZE!
 
     // =====================================================================
-    //  TRACKER SITE CONFIG TABLE
+    //  MATCHERS
+    // =====================================================================
+
+    const MATCHERS = [
+        'Chatbot',          // ATH
+        'ULCX',             // ULCX
+        'Willie',           // BHD
+        'WALL-E',           // RFX
+        'BBot',             // HHD
+        'darkpeers',        // DP
+        'Bot',              // LST
+        'Mellos',           // HUNO (Discord)
+        /.+?-web/,          // HUNO (Shoutbox) — regex gets raw username
+        'Sauron',           // ANT
+        'bridgebot',        // OE+
+    ];
+
+    function matcherMatches(username) {
+        const bare = stripIrcPrefix(username);
+        return MATCHERS.some(pattern =>
+            typeof pattern === 'string'
+                ? pattern === bare
+                : pattern instanceof RegExp && pattern.test(username)
+        );
+    }
+
+    // =====================================================================
+    //  FORMAT HANDLERS
+    // =====================================================================
+    //
+    // Each handler receives { text, html, from, chan } and returns either
+    // null (no match) or an object:
+    //   username:       the extracted bridged username
+    //   modifyContent:  whether to remove the prefix from message content
+    //   prefixToRemove: the text to surgically remove from the content DOM
+    //   metadata:       string shown in data-usb-bridged attribute (e.g. 'SB')
+    //
+    // Handlers are tried in order; the first match wins.
+
+    function removeMatchedPrefix(match) {
+        const fullMatch = match[0];
+        const messageText = match[match.length - 1];
+        return fullMatch.substring(0, fullMatch.lastIndexOf(messageText));
+    }
+
+    function removeAllExceptMessage(text, messageText) {
+        return text.substring(0, text.lastIndexOf(messageText));
+    }
+
+    const HANDLERS = [
+        {
+            // [SB] Nickname: Message or [ SB ] (Nickname): Message — BHD, ANT
+            enabled: true,
+            handler: function (msg) {
+                const match = msg.text.match(/^\s?\[\s?SB\s?\]\s+\(?([^):]+)\)?:\s*(.*)$/);
+                if (!match) return null;
+                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
+            }
+        },
+        {
+            // [Chatbox] Nickname: Message — RFX
+            enabled: true,
+            handler: function (msg) {
+                const match = msg.text.match(/^\[Chatbox\]\s+([^:]+):\s*(.*)$/);
+                if (!match) return null;
+                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
+            }
+        },
+        {
+            // »Username« Message or »Username (Rank)« Message — HUNO (Discord)
+            enabled: true,
+            handler: function (msg) {
+                const HANDLER_CONFIG = { REMOVE_RANK: true, ABBREVIATE_RANK: true, FORCE_ABBREVIATE: false };
+                const cleanText = msg.text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+                let match = cleanText.match(/^»([^«]+)«\s*(.*)$/);
+                if (!match) match = cleanText.match(/^»(\S+(?:\s+\([^)]+\))?)\s+(.*)$/);
+                if (!match) return null;
+
+                function abbreviateRank(rank) {
+                    const caps = rank.match(/[A-Z]/g);
+                    if (!caps) return '';
+                    if (!HANDLER_CONFIG.FORCE_ABBREVIATE && caps.length === 1) return rank;
+                    return caps.join('');
+                }
+
+                let rawUsername = match[1], extractedUsername, metadata = '';
+                if (HANDLER_CONFIG.REMOVE_RANK && rawUsername.endsWith(')')) {
+                    const rankMatch = rawUsername.match(/^(.*)\s+\(([^)]+)\)$/);
+                    if (rankMatch) {
+                        extractedUsername = rankMatch[1].trim();
+                        metadata = HANDLER_CONFIG.ABBREVIATE_RANK ? abbreviateRank(rankMatch[2]) : rankMatch[2];
+                    } else { extractedUsername = rawUsername.trim(); }
+                } else { extractedUsername = rawUsername.trim(); }
+
+                return { username: extractedUsername, modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata };
+            }
+        },
+        {
+            // <Username-web> Message — HUNO (Shoutbox)
+            enabled: true,
+            handler: function (msg) {
+                if (!msg.chan.startsWith('#huno')) return null;
+                if (msg.from.endsWith('-web')) {
+                    return { username: msg.from.slice(0, -4), modifyContent: false, metadata: CONFIG.METADATA };
+                }
+                return null;
+            }
+        },
+        {
+            // [Nickname] Message or [Nickname]: Message — ATH, DP, ULCX, HHD, LST
+            enabled: true,
+            handler: function (msg) {
+                const match = msg.text.match(/^\[([^\]]+)\](?::\s*|\s+)(.*)$/);
+                if (!match) return null;
+                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
+            }
+        }
+    ];
+
+    function runFormatHandlers(msg) {
+        for (const h of HANDLERS) {
+            if (!h.enabled) continue;
+            const result = h.handler(msg);
+            if (result) return result;
+        }
+        return null;
+    }
+
+    // =====================================================================
+    //  TRACKER CONFIG TABLE
     // =====================================================================
     //
     // Per-site configuration for UNIT3D integration features.
@@ -116,9 +236,9 @@
         },
         'hawke.uno': {
             urlAvatar: '/files/img/{user}.png',
+            faFontPath: '/fonts/font-awesome/fa-solid-900.woff2',
             urlIcon: false,
             urlProfile: false,
-            faFontPath: false,      // HUNO doesn't serve FA Pro to us
             featGroupIcon: false,
             featGroupName: false,
             featCustomIcon: false,
@@ -138,6 +258,58 @@
         },
     };
 
+    // =====================================================================
+    //  DEFAULT CSS
+    // =====================================================================
+
+    const USB_DEFAULT_CSS = `
+            .usb-avatar {
+                display: inline-block;
+                vertical-align: middle;
+                margin-right: 4px;
+                width: 20px;
+                height: 20px;
+                flex-shrink: 0;
+            }
+            .usb-avatar img {
+                width: 20px;
+                height: 20px;
+                border-radius: 50%;
+                object-fit: cover;
+                vertical-align: middle;
+                display: block;
+            }
+            .usb-group {
+                vertical-align: middle;
+                margin-right: 3px;
+            }
+            .usb-icon {
+                display: inline-block;
+                vertical-align: middle;
+                margin-left: 3px;
+            }
+            .usb-icon img {
+                height: 16px;
+                object-fit: cover;
+                vertical-align: middle;
+            }
+            .usb-sparkles {
+                background-repeat: repeat;
+                background-size: auto;
+                padding: 1px 3px;
+                border-radius: 3px;
+            }
+            .usb-unit3d-colors {
+                color: var(--usb-unit3d-color) !important;
+            }
+            .usb-settings-btn button:before {
+                content: '\\f4d8' !important;
+            }
+
+        `;
+
+    // ---- END OF USER CUSTOMIZATION! EDIT BENEATH THIS LINE AT UR OWN RISK
+
     function getSiteConfig(site) {
         const specific = SITE_CONFIG[site] || {};
         const defaults = SITE_CONFIG['default'];
@@ -150,8 +322,20 @@
     }
 
     // =====================================================================
-    //  STORAGE (localStorage with usb_ prefix)
+    //  CAPABILITY DETECTION
     // =====================================================================
+
+    const HAS_GM_XHR = typeof GM_xmlhttpRequest !== 'undefined';
+
+    // =====================================================================
+    //  STORAGE
+    // =====================================================================
+    //
+    // localStorage (usb_ prefix): settings, site mappings, tracker sites,
+    //   metadata cache, FA font data, FA codepoints. All small payloads.
+    //
+    // IndexedDB (usb_cache): avatar image data URLs. Large payloads that
+    //   would exceed localStorage's ~5-10MB quota.
 
     const STORE_PREFIX = 'usb_';
 
@@ -301,8 +485,7 @@
     }
 
     // Tracked sites: user-maintained list of tracker hostnames for dropdown menus.
-    // Unlike the old cookie bridge, these are just labels — authentication is
-    // handled automatically by GM_xmlhttpRequest forwarding browser cookies.
+    // Authentication is handled automatically by GM_xmlhttpRequest forwarding browser cookies.
     function loadTrackerSites() {
         return storeGet('tracker_sites') || [];
     }
@@ -365,6 +548,14 @@
     // =====================================================================
     //  AVATAR CACHE & FETCHING
     // =====================================================================
+    //
+    // Storage: IndexedDB (usb_cache/avatars). No meaningful size limits.
+    // In-memory: avatarUrlCache Map for instant lookups within a session.
+    // In-flight: avatarInflight Map deduplicates concurrent fetches.
+    //
+    // Avatars are fetched via GM_xmlhttpRequest (uses browser cookies for
+    // authentication). Stored as full data URLs — no thumbnailization needed
+    // since IndexedDB has no quota concerns. TTL: 30 days.
 
     const AVATAR_PREFIX = 'av/';
     const AVATAR_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -484,6 +675,11 @@
         return fetchPromise;
     }
 
+    /**
+     * Inject an avatar into a .from div (used by context menu refresh).
+     * For initial message processing, processMessage() inserts a placeholder
+     * synchronously to prevent layout shift, then fills the src async.
+     */
     function injectAvatar(fromDiv, avatarUrl) {
         if (!avatarUrl || fromDiv.querySelector('.usb-avatar')) return;
 
@@ -928,10 +1124,17 @@
         injectFaStyles(fontDataUrl, codepoints);
     }
     // =====================================================================
+    //  UNIT3D METADATA SCRAPING
+    // =====================================================================
     //
-    // Scrapes the "online users" widget from UNIT3D sites to build a
-    // local database of rank, rank color, icon class, donor status, etc.
+    // Scrapes user-tag links from UNIT3D site homepages to build a local
+    // cache of rank, rank color, icon class, donor status, etc.
     // Falls back to individual profile page fetches for cache misses.
+    //
+    // Cache: localStorage, keyed as meta_{site}/{username}, 24h TTL.
+    // Scrape interval: 15 minutes (additive — new data merges with existing).
+    // Profile fetch limit: 5 consecutive misses before pausing (resets on
+    //   successful bulk scrape). Manual refresh bypasses this limit.
 
     const META_PREFIX = 'meta_';
     const META_TTL = 24 * 60 * 60 * 1000; // 24 hours
@@ -1117,17 +1320,8 @@
     }
 
     /**
-     * Start periodic scraping for a site.
-     */
-    function startScrapeSchedule(site) {
-        if (scrapeTimers.has(site)) return;
-        scrapeSiteUsers(site);
-        const timer = setInterval(() => scrapeSiteUsers(site), SCRAPE_INTERVAL);
-        scrapeTimers.set(site, timer);
-    }
-
-    /**
      * Start scraping for all mapped sites (network or channel level).
+     * Runs an initial scrape for each, then sets up periodic refresh.
      */
     async function initializeMetadataScraping() {
         const mappings = loadSiteMappings();
@@ -1150,129 +1344,6 @@
                 scrapeTimers.set(site, timer);
             }
         }
-    }
-
-    // =====================================================================
-    //  MATCHERS
-    // =====================================================================
-
-    const MATCHERS = [
-        'Chatbot',          // ATH
-        'ULCX',             // ULCX
-        'Willie',           // BHD
-        'WALL-E',           // RFX
-        'BBot',             // HHD
-        'darkpeers',        // DP
-        'Bot',              // LST
-        'Mellos',           // HUNO (Discord)
-        /.+?-web/,          // HUNO (Shoutbox) — regex gets raw username
-        'Sauron',           // ANT
-        'bridgebot',        // OE+
-    ];
-
-    function matcherMatches(username) {
-        const bare = stripIrcPrefix(username);
-        return MATCHERS.some(pattern =>
-            typeof pattern === 'string'
-                ? pattern === bare
-                : pattern instanceof RegExp && pattern.test(username)
-        );
-    }
-
-    // =====================================================================
-    //  FORMAT HANDLERS
-    // =====================================================================
-
-    // See earlier versions for full documentation on handler structure.
-    // Each handler returns { username, modifyContent, prefixToRemove, metadata } or null.
-
-    function removeMatchedPrefix(match) {
-        const fullMatch = match[0];
-        const messageText = match[match.length - 1];
-        return fullMatch.substring(0, fullMatch.lastIndexOf(messageText));
-    }
-
-    function removeAllExceptMessage(text, messageText) {
-        return text.substring(0, text.lastIndexOf(messageText));
-    }
-
-    const HANDLERS = [
-        {
-            // [SB] Nickname: Message or [ SB ] (Nickname): Message — BHD, ANT
-            enabled: true,
-            handler: function (msg) {
-                const match = msg.text.match(/^\s?\[\s?SB\s?\]\s+\(?([^):]+)\)?:\s*(.*)$/);
-                if (!match) return null;
-                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
-            }
-        },
-        {
-            // [Chatbox] Nickname: Message — RFX
-            enabled: true,
-            handler: function (msg) {
-                const match = msg.text.match(/^\[Chatbox\]\s+([^:]+):\s*(.*)$/);
-                if (!match) return null;
-                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
-            }
-        },
-        {
-            // »Username« Message or »Username (Rank)« Message — HUNO (Discord)
-            enabled: true,
-            handler: function (msg) {
-                const HANDLER_CONFIG = { REMOVE_RANK: true, ABBREVIATE_RANK: true, FORCE_ABBREVIATE: false };
-                const cleanText = msg.text.replace(/[\u200B-\u200D\uFEFF]/g, '');
-                let match = cleanText.match(/^»([^«]+)«\s*(.*)$/);
-                if (!match) match = cleanText.match(/^»(\S+(?:\s+\([^)]+\))?)\s+(.*)$/);
-                if (!match) return null;
-
-                function abbreviateRank(rank) {
-                    const caps = rank.match(/[A-Z]/g);
-                    if (!caps) return '';
-                    if (!HANDLER_CONFIG.FORCE_ABBREVIATE && caps.length === 1) return rank;
-                    return caps.join('');
-                }
-
-                let rawUsername = match[1], extractedUsername, metadata = '';
-                if (HANDLER_CONFIG.REMOVE_RANK && rawUsername.endsWith(')')) {
-                    const rankMatch = rawUsername.match(/^(.*)\s+\(([^)]+)\)$/);
-                    if (rankMatch) {
-                        extractedUsername = rankMatch[1].trim();
-                        metadata = HANDLER_CONFIG.ABBREVIATE_RANK ? abbreviateRank(rankMatch[2]) : rankMatch[2];
-                    } else { extractedUsername = rawUsername.trim(); }
-                } else { extractedUsername = rawUsername.trim(); }
-
-                return { username: extractedUsername, modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata };
-            }
-        },
-        {
-            // <Username-web> Message — HUNO (Shoutbox)
-            enabled: true,
-            handler: function (msg) {
-                if (!msg.chan.startsWith('#huno')) return null;
-                if (msg.from.endsWith('-web')) {
-                    return { username: msg.from.slice(0, -4), modifyContent: false, metadata: CONFIG.METADATA };
-                }
-                return null;
-            }
-        },
-        {
-            // [Nickname] Message or [Nickname]: Message — ATH, DP, ULCX, HHD, LST
-            enabled: true,
-            handler: function (msg) {
-                const match = msg.text.match(/^\[([^\]]+)\](?::\s*|\s+)(.*)$/);
-                if (!match) return null;
-                return { username: match[1], modifyContent: true, prefixToRemove: removeMatchedPrefix(match), metadata: CONFIG.METADATA };
-            }
-        }
-    ];
-
-    function runFormatHandlers(msg) {
-        for (const h of HANDLERS) {
-            if (!h.enabled) continue;
-            const result = h.handler(msg);
-            if (result) return result;
-        }
-        return null;
     }
 
     // =====================================================================
@@ -1399,16 +1470,6 @@
         const el = document.createElement('span');
         el.textContent = str;
         return el.innerHTML;
-    }
-
-    function timeSince(timestamp) {
-        const s = Math.floor((Date.now() - timestamp) / 1000);
-        if (s < 60) return 'just now';
-        const m = Math.floor(s / 60);
-        if (m < 60) return `${m}m ago`;
-        const h = Math.floor(m / 60);
-        if (h < 24) return `${h}h ago`;
-        return `${Math.floor(h / 24)}d ago`;
     }
 
     function showToast(message) {
@@ -1791,47 +1852,7 @@
         if (document.querySelector('#usb-styles')) return;
         const style = document.createElement('style');
         style.id = 'usb-styles';
-        style.textContent = `
-            .usb-avatar {
-                display: inline-block;
-                vertical-align: middle;
-                margin-right: 4px;
-                width: 20px;
-                height: 20px;
-                flex-shrink: 0;
-            }
-            .usb-avatar img {
-                width: 20px;
-                height: 20px;
-                border-radius: 50%;
-                object-fit: cover;
-                vertical-align: middle;
-                display: block;
-            }
-            .usb-group {
-                vertical-align: middle;
-                margin-right: 3px;
-            }
-            .usb-icon {
-                display: inline-block;
-                vertical-align: middle;
-                margin-left: 3px;
-            }
-            .usb-icon img {
-                height: 16px;
-                object-fit: cover;
-                vertical-align: middle;
-            }
-            .usb-sparkles {
-                background-repeat: repeat;
-                background-size: auto;
-                padding: 1px 3px;
-                border-radius: 3px;
-            }
-            .usb-unit3d-colors {
-                color: var(--usb-unit3d-color) !important;
-            }
-        `;
+        style.textContent = USB_DEFAULT_CSS;
         document.head.appendChild(style);
     }
 
@@ -2245,7 +2266,7 @@
         if (!isLounge) return;
 
         // Open IndexedDB early (avatar cache lives here)
-        openIdb().catch(() => {});
+        openIdb().catch(() => { });
 
         injectDefaultStyles();
         initializeRouterMonitor();
