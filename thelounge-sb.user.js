@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.71
+// @version      2.72
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -45,6 +45,7 @@
 // - 2.6 - (FortKnox1337) Add RFX support, enable DP and HHD support, fix ANT/BHD support (thanks!!)
 // - 2.7 - (cmd430) Enable OE+ support, fix config indents, fixes script breaking after viewing a non-chat page
 // - 2.71 - (spindrift) New Aither chatbot
+// - 2.72 - (FortKnox1337) Fix DP, HHD, add MidnightScene
 
 
 // CSS STYLING:
