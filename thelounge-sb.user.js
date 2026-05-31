@@ -75,17 +75,22 @@
         // Can also add regex patterns for more complex matches
         // NOTE: A hit from any matcher will run all handlers
         MATCHERS: [
-            '!Chatbot',          // ATH
+            '!Chatbot',         // ATH
             '%ULCX',            // ULCX
             '@Willie',          // BHD
             '@WALL-E',          // RFX
-            'BBot', '@BBot',    // HHD
-            '&darkpeers',       // DP
+            '!BBot',            // HHD
+            '~DP',              // DP
             'Bot',              // LST
             '+Mellos',          // HUNO (Discord)
             /.+?-web/,          // HUNO (Shoutbox)
+            '&MSBridge',        // MidnightScene
             '&Sauron',          // ANT
             '+bridgebot',       // OE+
+            '+Luminarr',        // LUME
+            '~Announce',        // LUME (Announce)
+            '+YUS',             // Yu-Scene
+            '+YUSceneAnnounce', // Yu-Scene (Announce)
         ],
         USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
         USE_DECORATORS: true,   // Enable username decorators
