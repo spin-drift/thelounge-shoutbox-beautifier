@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      2.73
+// @version      2.74
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://your-thelounge-domain.com/*
@@ -47,6 +47,7 @@
 // - 2.71 - (spindrift) New Aither chatbot
 // - 2.72 - (FortKnox1337) Fix DP, HHD, add MidnightScene
 // - 2.73 - (spindrift) Add ZNTH
+// - 2.74 - (spindrift) Update ZNTH
 
 
 // CSS STYLING:
@@ -93,7 +94,7 @@
             '~Announce',        // LUME (Announce)
             '+YUS',             // Yu-Scene
             '+YUSceneAnnounce', // Yu-Scene (Announce)
-            '@Zenith',          // ZNTH
+            '~Zenith',          // ZNTH
         ],
         USE_AUTOCOMPLETE: true, // Enable autocomplete for usernames
         USE_DECORATORS: true,   // Enable username decorators
