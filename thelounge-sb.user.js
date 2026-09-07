@@ -48,6 +48,7 @@
 // - 2.72 - (FortKnox1337) Fix DP, HHD, add MidnightScene
 // - 2.73 - (spindrift) Add ZNTH
 // - 2.74 - (spindrift) Update ZNTH
+// - 2.75 - (spindrift) Update ATH
 
 
 // CSS STYLING:
@@ -78,7 +79,7 @@
         // Can also add regex patterns for more complex matches
         // NOTE: A hit from any matcher will run all handlers
         MATCHERS: [
-            '!Chatbot',         // ATH
+            'Chatbot',         // ATH
             '%ULCX',            // ULCX
             '@Willie',          // BHD
             '@WALL-E',          // RFX
