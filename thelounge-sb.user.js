@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ultimate Shoutbox Beautifier for TheLounge
 // @namespace    http://tampermonkey.net/
-// @version      3.0-dev0.6
+// @version      3.0-dev0.7
 // @description  Reformats chatbot relay messages to appear as direct user messages
 // @author       spindrift
 // @match        *://irc.badkitty.zone/*
@@ -13,6 +13,7 @@
 // @connect      reelflix.cc
 // @connect      seedpool.org
 // @connect      upload.cx
+// @connect      znth.cx
 //
 // @icon         https://thelounge.chat/favicon.ico
 // @grant        GM_xmlhttpRequest
@@ -99,6 +100,7 @@
         /.+?-web/,          // HUNO (Shoutbox) — regex gets raw username
         'Sauron',           // ANT
         'bridgebot',        // OE+
+        'Zenith'            // Zenith
     ];
 
     function matcherMatches(username) {
